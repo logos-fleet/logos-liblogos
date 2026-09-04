@@ -82,12 +82,14 @@ sections:
       - title: "Hand it a real plugin and read the verdict"
         run: |
           printf '00000000-0000-0000-0000-000000000000\n' > token.txt
-          # ABSOLUTE, and it is not stylistic: the host answers a relative
-          # --path with "the shared library was not found" rather than loading
-          # it. And on Windows the absolute path has to be in Windows form,
-          # which is what cygpath -- present in git-bash and nowhere else --
-          # converts it to.
-          plugin="$(pwd)/logos-liblogos-bin/modules/modules_state/modules_state_plugin.{ext}"
+          # Relative is fine: the host resolves --path against the working
+          # directory. It did not always -- a relative path used to come back as
+          # "the shared library was not found", which reads as a missing
+          # dependency of a plugin that was found rather than as a path nobody
+          # resolved. cygpath stays, for its own separate reason: git-bash hands
+          # a POSIX path to a NATIVE exe, and cygpath -- present there and
+          # nowhere else -- is what puts it in Windows form.
+          plugin="logos-liblogos-bin/modules/modules_state/modules_state_plugin.{ext}"
           if command -v cygpath >/dev/null 2>&1; then plugin=$(cygpath -w "$plugin"); fi
           ./logos-liblogos-bin/bin/logos_host_qt{exe} \
             --name modules_state \
@@ -107,7 +109,7 @@ sections:
           printf '<token>\n' > token.txt
           ./logos-liblogos-bin/bin/logos_host_qt \
             --name modules_state \
-            --path "$PWD/logos-liblogos-bin/modules/modules_state/modules_state_plugin.dylib" \
+            --path logos-liblogos-bin/modules/modules_state/modules_state_plugin.dylib \
             --token-source stdin < token.txt
         expect_contains:
           - "@logos-load-status ok"
