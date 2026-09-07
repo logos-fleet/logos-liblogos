@@ -8,9 +8,10 @@
 //
 // The two halves are a pair, and the second is what stops the first from being
 // "fixed" by removing the lock: DIFFERENT modules must overlap, the SAME module
-// must not. Spawn counts come from the stand-in host itself rather than from
-// what the caller was told, since the defect being guarded against is exactly a
-// second child nobody asked for.
+// must not. Both read the marks the stand-in hosts left rather than anything
+// the caller was told -- for the same module because the defect being guarded
+// against is exactly a second child nobody asked for, and for different
+// modules because the caller's stopwatch times the machine as much as the lock.
 //
 // The third case is a load inside a load, on ONE thread, which the same locks
 // forbid for a different reason — see LoadReentrancyTest below.
@@ -23,7 +24,6 @@
 #include "subprocess_manager.h"
 
 #include <atomic>
-#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -48,28 +48,49 @@ protected:
 };
 
 // Two modules that have nothing to do with each other must be able to come up
-// at the same time. Each stand-in host stalls kSlowHostDelay before reporting,
-// so serialized these cost two delays and overlapped they cost one.
+// at the same time. Each stand-in host stalls before reporting, so the question
+// is whether the second host was started while the first was still inside that
+// stall: overlapped it was, serialized it cannot have been, because serialized
+// the second host does not exist until the first has reported and its load has
+// returned.
+//
+// Asked of the hosts' own marks, NOT of a stopwatch, and the difference is the
+// whole point of the rewrite. The obvious form — assert the pair finished in
+// under two stalls, on the reasoning that two sequential one-second sleeps
+// cannot — is sound about the lock and wrong about the measurement, because it
+// also measures the machine. On a loaded host a single load took ~2.1 s, so a
+// pair that plainly HAD overlapped (22 ms between the two "loaded" lines, where
+// serialized would be a full stall apart) still ran 4.2 s and failed a 2 s
+// budget. Every budget has that failure somewhere; widening it only moves it.
+// Two marks in one file cannot be reordered by load, so this has no budget.
 TEST_F(LoadConcurrencyTest, DifferentModulesLoadConcurrently) {
     plantModule("alpha", "slow-ok");
     plantModule("beta", "slow-ok");
 
-    const auto start = std::chrono::steady_clock::now();
     std::thread a([] { logos_core_load_module("alpha", false); });
     std::thread b([] { logos_core_load_module("beta", false); });
     a.join();
     b.join();
-    const auto elapsed = std::chrono::steady_clock::now() - start;
 
     EXPECT_TRUE(logos_core_is_module_loaded("alpha"));
     EXPECT_TRUE(logos_core_is_module_loaded("beta"));
-    // Two delays is the exact floor for a serialized pair — two sequential
-    // sleeps of kSlowHostDelay cannot finish sooner — so anything under it is
-    // proof they overlapped, and no arbitrary margin is involved.
-    EXPECT_LT(elapsed, 2 * kSlowHostDelay)
-        << "the two loads were serialized: "
-        << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
-        << " ms for two " << kSlowHostDelay.count() << " ms loads";
+
+    const HostWindow alpha = hostWindow("alpha");
+    const HostWindow beta = hostWindow("beta");
+    ASSERT_GE(alpha.reported, 0) << "alpha's host never reported, so there is "
+                                    "no window to overlap:" << hostEventLog();
+    ASSERT_GE(beta.reported, 0) << "beta's host never reported, so there is "
+                                   "no window to overlap:" << hostEventLog();
+
+    // The two windows intersect: each host had started before the other one
+    // reported. Both directions, since either alone is satisfied by a run where
+    // one host came and went entirely before the other started.
+    EXPECT_LT(alpha.entered, beta.reported)
+        << "alpha's host did not start until beta had already reported, so the "
+           "two loads were serialized:" << hostEventLog();
+    EXPECT_LT(beta.entered, alpha.reported)
+        << "beta's host did not start until alpha had already reported, so the "
+           "two loads were serialized:" << hostEventLog();
 }
 
 // Two dependency CHAINS that share a dependency. Each caller asks for its own
