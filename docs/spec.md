@@ -205,6 +205,18 @@ boundary: during processing (`ModuleRegistry::processModuleInternal`) a module w
 - Dependencies are loaded in correct order before the requesting module
 - The core maintains an in-process dependency graph with both forward and reverse edges. The reverse edges are re-derived from the forward edges at the tail of every discovery or metadata-processing pass, so cascade unload and dependent queries answer from memory without re-reading manifests from disk.
 
+#### Optional dependencies
+
+`metadata.json#optional_dependencies` is a SECOND edge set: concrete modules a module can call but does not require. The registry keeps it, and its reverse edges, apart from `dependencies` — every statement above is about the required set, and each of the differences below is a place where merging them would be wrong.
+
+- **Not loaded.** `logos_core_load_module(name, true)` resolves and loads the required tree only. An optional dependency is never pulled in, so the caller (an app, `logoscore -l`, a package manager) owns its lifetime.
+- **Not a failure.** An optional dependency that is absent or unknown never appears in `ResolveResult::missing` and never fails a load.
+- **Ordering only, and only when it can.** `DependencyResolver::resolve` takes the optional edges as SOFT edges: they order modules already in the set — so an optional dependency requested in the same batch comes up first and the dependent's startup calls land — but they never expand it. A soft edge that would close a cycle is dropped, and `hasCycle` continues to reflect the required edges alone: breaking a cycle is what optional dependencies are for, so reporting one as a cycle would refuse the configuration the feature exists to allow.
+- **No cascade.** `unloadModuleWithDependents` walks required reverse edges only. A module that declared it tolerates absence is not taken down when the thing it tolerates goes away.
+- **Still a caller.** Under `mode: "enforce"`, a loaded optional dependent IS in a target's derived allowed-caller list. The declaration is what grants the right to call; whether the loader had to supply the target is a separate question. Omitting them would deny a declared call between two loaded modules, and the caller would see a default value rather than an error.
+
+`logos_core_get_module_optional_dependencies(name)` reads the set. There is no `recursive` form: an optional edge says nothing about what lies beyond it.
+
 ### Process Monitoring
 
 - CPU percentage, CPU time, and memory usage tracked per module process

@@ -200,7 +200,7 @@ on a specific container.
 - `std::vector<std::string> m_modulesDirs` — configured module directories
 - `std::shared_mutex m_mutex` — reader-writer lock protecting all fields
 
-**Dependency graph invariant:** `ModuleInfo::dependents` mirrors the inverse of `dependencies` across all known modules. `ModuleRegistry` owns this invariant and maintains it by calling the private `recomputeDependentsLocked()` at the tail of every forward-edge mutation (`discoverInstalledModules`, `processModule`, `registerModule` when deps are passed, `registerDependencies`). Callers never populate `dependents` directly. This replaces the previous pattern of querying `PackageManagerLib::resolveDependents()` on disk — the registry is now the single authority for reverse-dep lookups, and `ModuleManager::getDependents` / `unloadModuleWithDependents` read straight from it.
+**Dependency graph invariant:** `ModuleInfo::dependents` mirrors the inverse of `dependencies`, and `ModuleInfo::optionalDependents` the inverse of `optionalDependencies`, across all known modules. The two edge sets are inverted separately and never merged — the load closure, the teardown cascade and the missing-dependency verdict all read the required set, and every one of them must ignore the optional one. `ModuleRegistry` owns this invariant and maintains it by calling the private `recomputeDependentsLocked()` at the tail of every forward-edge mutation (`discoverInstalledModules`, `processModule`, `registerModule` when deps are passed, `registerDependencies`). Callers never populate `dependents` directly. This replaces the previous pattern of querying `PackageManagerLib::resolveDependents()` on disk — the registry is now the single authority for reverse-dep lookups, and `ModuleManager::getDependents` / `unloadModuleWithDependents` read straight from it.
 
 **API (class `ModuleRegistry`):**
 
@@ -211,8 +211,11 @@ on a specific container.
 | `modulesDirs() → std::vector<std::string>` | Return configured directories |
 | `discoverInstalledModules()` | Scan directories, parse manifest.json files; recomputes dependents at end |
 | `processModule(path) → std::string` | Extract metadata from module file, register as known; recomputes dependents at end. Rejects (returns `""`, no registry entry) a module whose name — taken from untrusted plugin JSON — is not a single safe path segment (`logos::isSafePathSegment`), since the name later becomes a token-socket / persistence path component |
-| `registerModule(name, path, deps)` | Manually register a module; recomputes dependents when deps are passed |
+| `registerModule(name, path, deps, optionalDeps)` | Manually register a module; recomputes both dependent sets |
 | `registerDependencies(name, deps)` | Set dependencies for a known module; recomputes dependents |
+| `registerOptionalDependencies(name, deps)` | Set optional dependencies for a known module; recomputes dependents |
+| `moduleOptionalDependencies(name) → std::vector<std::string>` | Forward optional edges. Direct only — an optional edge says nothing about what lies beyond it |
+| `moduleOptionalDependents(name) → std::vector<std::string>` | Reverse optional edges. Direct only, same reason |
 | `isKnown(name) → bool` | Module exists in registry |
 | `modulePath(name) → std::string` | Get file path for a known module |
 | `moduleDependencies(name, recursive) → std::vector<std::string>` | Forward-edge lookup. `recursive=false` returns direct dependencies from `ModuleInfo`; `recursive=true` walks the forward graph breadth-first (cycle/diamond safe) |

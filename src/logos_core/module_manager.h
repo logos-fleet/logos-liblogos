@@ -112,6 +112,11 @@ namespace ModuleManager {
     char** getDependenciesCStr(const char* name, bool recursive);
     char** getDependentsCStr(const char* name, bool recursive);
 
+    // The optional edge set. Direct only — an optional edge says nothing about
+    // what lies beyond it, so there is no transitive question to ask.
+    std::vector<std::string> getOptionalDependencies(const std::string& name);
+    char** getOptionalDependenciesCStr(const char* name);
+
     // JSON (string) describing every known module: name, path, loaded flag,
     // direct dependencies, direct dependents, and full embedded metadata.
     // See ModuleRegistry::allModulesInfo for the shape.

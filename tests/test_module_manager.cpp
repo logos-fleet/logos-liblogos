@@ -1381,6 +1381,29 @@ TEST_F(CascadeUnloadTest, UnloadWithDependents_RecursiveDependentsLeavesFirst) {
     EXPECT_EQ(logos_core_has_process("c"), 0);
 }
 
+// An OPTIONAL dependent must SURVIVE its dependency going away. That is the
+// half of "lifetime is managed externally" the teardown path owns: a module
+// that declared it can tolerate absence is not entitled to be killed when the
+// thing it tolerates disappears.
+TEST_F(CascadeUnloadTest, UnloadWithDependents_OptionalDependentSurvives) {
+    writeManifestsAndScan({{"provider", {}}, {"consumer", {}}});
+    setupLoaded("provider", {});
+    setupLoaded("consumer", {});
+
+    const char* opt[] = {"provider"};
+    logos_core_register_module_optional_dependencies("consumer", opt, 1);
+
+    ASSERT_EQ(logos_core_is_module_loaded("provider"), 1);
+    ASSERT_EQ(logos_core_is_module_loaded("consumer"), 1);
+
+    int result = logos_core_unload_module("provider", true);
+    EXPECT_EQ(result, 1);
+
+    EXPECT_EQ(logos_core_is_module_loaded("provider"), 0);
+    EXPECT_EQ(logos_core_is_module_loaded("consumer"), 1)
+        << "an optional dependent must not be cascaded down with its dependency";
+}
+
 TEST_F(CascadeUnloadTest, UnloadWithDependents_UnloadedDependentsIgnored) {
     // b depends on c. Only c is loaded; b is known but not loaded. Cascade
     // should only touch c. b stays unloaded (not "failed to unload").
@@ -1642,11 +1665,63 @@ protected:
         return std::set<std::string>(v.begin(), v.end());
     }
 
+    // Register `name` with `deps` declared as OPTIONAL dependencies.
+    static void regOptional(const std::string& name,
+                            const std::vector<std::string>& deps) {
+        logos_core_register_module(name.c_str(), ("/fake/" + name).c_str());
+        std::vector<const char*> d;
+        for (const auto& s : deps) d.push_back(s.c_str());
+        logos_core_register_module_optional_dependencies(name.c_str(), d.data(),
+                                                         static_cast<int>(d.size()));
+    }
+
     // Minimal enforce policy with no explicit restrictions — turns derivation on.
     static const char* enforceEnvelope() {
         return "{\"version\":1,\"mode\":\"enforce\",\"restrictions\":{}}";
     }
 };
+
+// An OPTIONAL dependent is a caller too. The declaration is what grants the
+// right to call; whether the loader had to supply the target is a different
+// question. Without this the call is refused between two loaded modules and
+// the caller sees a default value rather than an error — the exact fail-open
+// shape that is hardest to diagnose from the call site.
+TEST_F(DerivedRestrictionsManagerTest, LoadedOptionalDependentIsAllowed) {
+    reg("b", {});
+    regOptional("a", {"b"});
+    logos_core_mark_module_loaded("b");
+    logos_core_mark_module_loaded("a");
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+
+    EXPECT_EQ(derived("b"),
+              (std::set<std::string>{"a", "core", "core_service"}));
+}
+
+TEST_F(DerivedRestrictionsManagerTest, UnloadedOptionalDependentExcluded) {
+    reg("b", {});
+    regOptional("a", {"b"});
+    logos_core_mark_module_loaded("b");  // a left unloaded
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+
+    EXPECT_EQ(derived("b"), (std::set<std::string>{"core", "core_service"}));
+}
+
+// Declaring a name in both edge sets must not double-count it into the list.
+TEST_F(DerivedRestrictionsManagerTest, RequiredAndOptionalDependentDedupes) {
+    reg("b", {});
+    logos_core_register_module("a", "/fake/a");
+    const char* d[] = {"b"};
+    logos_core_register_module_dependencies("a", d, 1);
+    logos_core_register_module_optional_dependencies("a", d, 1);
+    logos_core_mark_module_loaded("b");
+    logos_core_mark_module_loaded("a");
+    ModuleManager::setAccessPolicy(enforceEnvelope());
+
+    auto v = ModuleManager::computeDerivedAllowedCallers("b");
+    int occurrences = 0;
+    for (const auto& c : v) if (c == "a") ++occurrences;
+    EXPECT_EQ(occurrences, 1);
+}
 
 TEST_F(DerivedRestrictionsManagerTest, LoadedDependentPlusTrusted) {
     // a depends on b; both loaded. b's allowed callers = {a} ∪ trusted.

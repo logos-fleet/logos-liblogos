@@ -43,6 +43,16 @@ struct ModuleInfo {
     // graph mutation by ModuleRegistry itself; callers never populate it
     // directly. Use ModuleRegistry::moduleDependents() for transitive walks.
     std::vector<std::string> dependents;
+    // The SECOND edge set (metadata.json#optional_dependencies): concrete
+    // modules this one can call but does not require. Carries the same
+    // constraints as `dependencies` — an installer resolves both the same way;
+    // only the loader differs.
+    //
+    // Deliberately NOT merged into `dependencies`: the load closure, the
+    // teardown cascade and the missing-dependency verdict all read that one,
+    // and every one of them must ignore this one.
+    std::vector<LogosCore::ModuleDependency> optionalDependencies;
+    std::vector<std::string> optionalDependents;
     bool loaded = false;
     // Unix timestamp (seconds) of the most recent load, set by markLoaded and
     // cleared to 0 by markUnloaded. 0 ⟺ not currently loaded. Callers derive a
@@ -96,6 +106,13 @@ public:
     // names yield an empty list.
     std::vector<std::string> moduleDependents(const std::string& name,
                                               bool recursive = false) const;
+    // The optional edge set. Direct only, in both directions: an optional edge
+    // says nothing about what lies beyond it, so a transitive walk mixing the
+    // two would answer a question nothing asks.
+    std::vector<std::string> moduleOptionalDependencies(const std::string& name) const;
+    std::vector<LogosCore::ModuleDependency>
+    moduleOptionalDependencyEntries(const std::string& name) const;
+    std::vector<std::string> moduleOptionalDependents(const std::string& name) const;
     std::vector<std::string> knownModuleNames() const;
     void registerModule(const std::string& name, const std::string& path,
                         const std::vector<std::string>& dependencies = {});
@@ -104,6 +121,8 @@ public:
     // checked against. Direct graph mutators alongside registerModule.
     void registerDependencies(const std::string& name,
                               const std::vector<LogosCore::ModuleDependency>& dependencies);
+    void registerOptionalDependencies(const std::string& name,
+                                      const std::vector<std::string>& optionalDependencies);
     void registerModuleVersion(const std::string& name, const std::string& version);
 
     bool isLoaded(const std::string& name) const;

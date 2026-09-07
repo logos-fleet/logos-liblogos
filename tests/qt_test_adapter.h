@@ -40,6 +40,23 @@ inline void logos_core_register_module_dependencies(const char* name,
     ModuleManager::registry().registerDependencies(std::string(name), stdDeps);
 }
 
+inline void logos_core_register_module_optional_dependencies(const char* name,
+                                                             const char** deps,
+                                                             int count)
+{
+    if (!name) return;
+    std::vector<std::string> stdDeps;
+    for (int i = 0; i < count; ++i)
+        if (deps && deps[i]) stdDeps.push_back(std::string(deps[i]));
+    ModuleManager::registry().registerOptionalDependencies(std::string(name), stdDeps);
+}
+
+inline char** logos_core_get_module_optional_dependencies_test(const char* name)
+{
+    if (!name) return nullptr;
+    return ModuleManager::getOptionalDependenciesCStr(name);
+}
+
 inline int logos_core_is_module_known(const char* name)
 {
     if (!name) return 0;

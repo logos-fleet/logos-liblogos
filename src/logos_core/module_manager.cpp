@@ -465,6 +465,13 @@ namespace {
         for (const auto& d : registryInstance().moduleDependents(target, /*recursive=*/false))
             if (registryInstance().isLoaded(d))
                 add(d);
+        // Optional dependents are callers too. The DECLARATION is what grants
+        // the right to call; whether the loader had to supply the target is a
+        // separate question. Omitting them denies a declared call between two
+        // loaded modules, and the caller sees a default value, not an error.
+        for (const auto& d : registryInstance().moduleOptionalDependents(target))
+            if (registryInstance().isLoaded(d))
+                add(d);
         for (const auto& t : kTrustedCallers)
             add(t);
         return callers;
@@ -491,6 +498,8 @@ namespace {
             return;
         runOnOwner([name]() {
             for (const auto& dep : registryInstance().moduleDependencies(name, /*recursive=*/false))
+                pushDerivedRestrictionForTarget(dep);
+            for (const auto& dep : registryInstance().moduleOptionalDependencies(name))
                 pushDerivedRestrictionForTarget(dep);
             pushDerivedRestrictionForTarget(name);
         });
@@ -1206,7 +1215,8 @@ namespace ModuleManager {
         auto resolved = DependencyResolver::resolve(
             requested,
             [](const std::string& n) { return registryInstance().isKnown(n); },
-            [](const std::string& n) { return registryInstance().moduleDependencies(n); }
+            [](const std::string& n) { return registryInstance().moduleDependencies(n); },
+            [](const std::string& n) { return registryInstance().moduleOptionalDependencies(n); }
         );
 
         // Treat missing dependencies and cycles as hard failures.
@@ -1466,7 +1476,8 @@ namespace ModuleManager {
         return DependencyResolver::resolve(
             requestedModules,
             [](const std::string& name) { return registryInstance().isKnown(name); },
-            [](const std::string& name) { return registryInstance().moduleDependencies(name); }
+            [](const std::string& name) { return registryInstance().moduleDependencies(name); },
+            [](const std::string& n) { return registryInstance().moduleOptionalDependencies(n); }
         ).order;
     }
 
@@ -1488,6 +1499,21 @@ namespace ModuleManager {
     char** getDependenciesCStr(const char* name, bool recursive) {
         return toNullTerminatedArray(
             getDependencies(std::string(name), recursive));
+    }
+
+    std::vector<std::string> getOptionalDependencies(const std::string& name) {
+        std::vector<std::string> deps = registryInstance().moduleOptionalDependencies(name);
+        std::vector<std::string> knownDeps;
+        knownDeps.reserve(deps.size());
+        for (const std::string& dep : deps) {
+            if (registryInstance().isKnown(dep))
+                knownDeps.push_back(dep);
+        }
+        return knownDeps;
+    }
+
+    char** getOptionalDependenciesCStr(const char* name) {
+        return toNullTerminatedArray(getOptionalDependencies(std::string(name)));
     }
 
     char** getDependentsCStr(const char* name, bool recursive) {

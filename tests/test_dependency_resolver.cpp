@@ -369,3 +369,110 @@ TEST_F(DependencyResolverTest, DuplicateNamesInRequest_AppearOnce) {
     for (const auto& s : v) if (s == "a") ++count;
     EXPECT_EQ(count, 1) << "duplicate requests should collapse to one entry";
 }
+
+// ---------------------------------------------------------------------------
+// Optional dependencies (metadata.json#optional_dependencies).
+//
+// They are the third dependency kind: concrete like `dependencies`, but never
+// auto-loaded and never a resolution failure when absent. The resolver treats
+// them as SOFT edges — they order, they do not expand, and they never cycle.
+// ---------------------------------------------------------------------------
+
+static int indexOf(const std::vector<std::string>& v, const std::string& name) {
+    for (std::size_t i = 0; i < v.size(); ++i)
+        if (v[i] == name) return static_cast<int>(i);
+    return -1;
+}
+
+TEST_F(DependencyResolverTest, OptionalDependency_NotPulledIntoClosure) {
+    logos_core_register_module("a", "/a");
+    logos_core_register_module("b", "/b");
+    const char* optA[] = {"b"};
+    logos_core_register_module_optional_dependencies("a", optA, 1);
+
+    const char* names[] = {"a"};
+    char** result = logos_core_resolve_dependencies(names, 1);
+    auto v = resolvedToVec(result);
+    freeResolved(result);
+
+    // The whole point: requesting `a` must not bring `b` up. Lifetime is the
+    // caller's to manage.
+    EXPECT_EQ(v.size(), 1u);
+    EXPECT_EQ(indexOf(v, "a"), 0);
+    EXPECT_EQ(indexOf(v, "b"), -1) << "an optional dependency must not extend the closure";
+}
+
+TEST_F(DependencyResolverTest, OptionalDependency_AbsentIsNotAFailure) {
+    logos_core_register_module("a", "/a");
+    const char* optA[] = {"never_installed"};
+    logos_core_register_module_optional_dependencies("a", optA, 1);
+
+    const char* names[] = {"a"};
+    char** result = logos_core_resolve_dependencies(names, 1);
+    auto v = resolvedToVec(result);
+    freeResolved(result);
+
+    // An unknown REQUIRED dependency empties the order (resolution failed); an
+    // unknown optional one must leave it intact.
+    EXPECT_EQ(v.size(), 1u);
+    EXPECT_EQ(indexOf(v, "a"), 0);
+}
+
+TEST_F(DependencyResolverTest, OptionalDependency_OrderedFirstWhenBothRequested) {
+    logos_core_register_module("a", "/a");
+    logos_core_register_module("b", "/b");
+    const char* optA[] = {"b"};
+    logos_core_register_module_optional_dependencies("a", optA, 1);
+
+    const char* names[] = {"a", "b"};
+    char** result = logos_core_resolve_dependencies(names, 2);
+    auto v = resolvedToVec(result);
+    freeResolved(result);
+
+    ASSERT_EQ(v.size(), 2u);
+    EXPECT_LT(indexOf(v, "b"), indexOf(v, "a"))
+        << "an optional dependency in the same batch should come up first, so "
+           "the dependent's startup calls land";
+}
+
+TEST_F(DependencyResolverTest, OptionalDependency_MayCloseACycleWithoutFailing) {
+    // a requires b; b optionally depends on a. This is exactly the shape an
+    // author uses optional dependencies to express, so it must resolve.
+    logos_core_register_module("a", "/a");
+    logos_core_register_module("b", "/b");
+    const char* depsA[] = {"b"};
+    logos_core_register_module_dependencies("a", depsA, 1);
+    const char* optB[] = {"a"};
+    logos_core_register_module_optional_dependencies("b", optB, 1);
+
+    const char* names[] = {"a"};
+    char** result = logos_core_resolve_dependencies(names, 1);
+    auto v = resolvedToVec(result);
+    freeResolved(result);
+
+    // Both present, and ordered by the REQUIRED edge — the soft edge that
+    // would have closed the cycle is dropped, not reported.
+    ASSERT_EQ(v.size(), 2u);
+    EXPECT_LT(indexOf(v, "b"), indexOf(v, "a"));
+}
+
+TEST_F(DependencyResolverTest, OptionalDependencies_ReadBackFromTheRegistry) {
+    logos_core_register_module("a", "/a");
+    logos_core_register_module("b", "/b");
+    const char* depsA[] = {"b"};
+    logos_core_register_module_dependencies("a", depsA, 1);
+    const char* optA[] = {"b"};
+    logos_core_register_module_optional_dependencies("a", optA, 1);
+
+    char** required = logos_core_get_module_dependencies("a", false);
+    char** optional = logos_core_get_module_optional_dependencies_test("a");
+    auto req = resolvedToVec(required);
+    auto opt = resolvedToVec(optional);
+    freeResolved(required);
+    freeResolved(optional);
+
+    // Two edge sets, read separately. A caller that merged them would
+    // reintroduce every distinction the split exists to keep.
+    EXPECT_EQ(req, std::vector<std::string>{"b"});
+    EXPECT_EQ(opt, std::vector<std::string>{"b"});
+}

@@ -3,14 +3,65 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <deque>
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace DependencyResolver {
 
+    // Kahn over `modulesToLoad` using `edgesOf` as the forward-edge source.
+    // Returns the order; short of the full set when the edges cycle.
+    static std::vector<std::string> topoSort(
+        const std::unordered_set<std::string>& modulesToLoad,
+        const std::function<std::vector<std::string>(const std::string&)>& edgesOf)
+    {
+        std::unordered_map<std::string, std::vector<std::string>> dependents;
+        std::unordered_map<std::string, int> inDegree;
+
+        for (const std::string& moduleName : modulesToLoad) {
+            if (!inDegree.count(moduleName)) {
+                inDegree[moduleName] = 0;
+            }
+
+            for (const std::string& depName : edgesOf(moduleName)) {
+                if (!depName.empty() && modulesToLoad.count(depName)) {
+                    inDegree[moduleName]++;
+                    dependents[depName].push_back(moduleName);
+                }
+            }
+        }
+
+        std::deque<std::string> zeroInDegree;
+
+        for (const std::string& moduleName : modulesToLoad) {
+            if (inDegree.count(moduleName) == 0 || inDegree.at(moduleName) == 0) {
+                zeroInDegree.push_back(moduleName);
+            }
+        }
+
+        std::vector<std::string> order;
+        while (!zeroInDegree.empty()) {
+            std::string moduleName = zeroInDegree.front();
+            zeroInDegree.pop_front();
+            order.push_back(moduleName);
+
+            auto it = dependents.find(moduleName);
+            if (it != dependents.end()) {
+                for (const std::string& dependent : it->second) {
+                    inDegree[dependent]--;
+                    if (inDegree[dependent] == 0) {
+                        zeroInDegree.push_back(dependent);
+                    }
+                }
+            }
+        }
+        return order;
+    }
+
     ResolveResult resolve(const std::vector<std::string>& requested,
                           IsKnownFn isKnown,
-                          GetDependenciesFn getDependencies) {
+                          GetDependenciesFn getDependencies,
+                          GetDependenciesFn getOptionalDependencies) {
         ResolveResult out;
 
         std::unordered_set<std::string> modulesToLoad;
@@ -47,45 +98,29 @@ namespace DependencyResolver {
             spdlog::warn("Missing dependencies detected: {}", joined);
         }
 
-        // Topological sort (Kahn's algorithm)
-        std::unordered_map<std::string, std::vector<std::string>> dependents;
-        std::unordered_map<std::string, int> inDegree;
+        // Hard edges decide BOTH the closure and whether this is a cycle.
+        out.order = topoSort(modulesToLoad, getDependencies);
 
-        for (const std::string& moduleName : modulesToLoad) {
-            if (!inDegree.count(moduleName)) {
-                inDegree[moduleName] = 0;
-            }
-
-            for (const std::string& depName : getDependencies(moduleName)) {
-                if (!depName.empty() && modulesToLoad.count(depName)) {
-                    inDegree[moduleName]++;
-                    dependents[depName].push_back(moduleName);
-                }
-            }
-        }
-
-        std::deque<std::string> zeroInDegree;
-
-        for (const std::string& moduleName : modulesToLoad) {
-            if (inDegree.count(moduleName) == 0 || inDegree.at(moduleName) == 0) {
-                zeroInDegree.push_back(moduleName);
-            }
-        }
-
-        while (!zeroInDegree.empty()) {
-            std::string moduleName = zeroInDegree.front();
-            zeroInDegree.pop_front();
-            out.order.push_back(moduleName);
-
-            auto it = dependents.find(moduleName);
-            if (it != dependents.end()) {
-                for (const std::string& dependent : it->second) {
-                    inDegree[dependent]--;
-                    if (inDegree[dependent] == 0) {
-                        zeroInDegree.push_back(dependent);
-                    }
-                }
-            }
+        // Soft edges only refine the order, and only when they can. An
+        // optional dependency requested alongside its dependent should come up
+        // first, but an optional edge that closes a cycle is dropped rather
+        // than reported -- breaking a cycle is what optional dependencies are
+        // for. Falling back wholesale (rather than removing one edge) keeps the
+        // answer a topological order of the hard graph, which is the only
+        // ordering the loader actually requires.
+        if (getOptionalDependencies && out.order.size() == modulesToLoad.size()) {
+            auto combinedEdges = [&](const std::string& n) {
+                std::vector<std::string> edges = getDependencies(n);
+                for (const std::string& soft : getOptionalDependencies(n))
+                    edges.push_back(soft);
+                return edges;
+            };
+            std::vector<std::string> refined = topoSort(modulesToLoad, combinedEdges);
+            if (refined.size() == modulesToLoad.size())
+                out.order = std::move(refined);
+            else
+                spdlog::debug("Optional dependency edges would cycle; "
+                              "ordering by required dependencies alone");
         }
 
         if (out.order.size() < modulesToLoad.size()) {

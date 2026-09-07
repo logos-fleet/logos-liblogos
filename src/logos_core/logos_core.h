@@ -56,6 +56,9 @@ LOGOS_CORE_EXPORT char** logos_core_get_loaded_modules();
 LOGOS_CORE_EXPORT char** logos_core_get_known_modules();
 
 // Load a specific module by name.
+// Optional dependencies are never part of this: with_dependencies resolves and
+// loads the REQUIRED tree only, and a missing optional dependency is not a
+// resolution failure.
 // When with_dependencies is true, resolves the dependency tree and loads
 // modules in correct topological order before loading the target.
 //
@@ -121,6 +124,15 @@ LOGOS_CORE_EXPORT char** logos_core_get_module_dependencies(const char* module_n
 // Returns a null-terminated array of module names that must be freed by the caller.
 LOGOS_CORE_EXPORT char** logos_core_get_module_dependents(const char* module_name, bool recursive);
 
+// Return the modules `module_name` declares as OPTIONAL dependencies: concrete
+// modules it can call but does not require. They are never auto-loaded, their
+// absence is not a load failure, and unloading one does not take its dependents
+// down — so unlike the two accessors above there is no `recursive` form. An
+// optional edge says nothing about what lies beyond it.
+// Unknown names yield a zero-length array (just a trailing NULL).
+// Returns a null-terminated array of module names that must be freed by the caller.
+LOGOS_CORE_EXPORT char** logos_core_get_module_optional_dependencies(const char* module_name);
+
 // Get information about all known modules as a JSON string.
 // Returns a JSON array; each element is an object with:
 //   "name"         module name
@@ -130,6 +142,9 @@ LOGOS_CORE_EXPORT char** logos_core_get_module_dependents(const char* module_nam
 //                  loaded (callers compute uptime as now - loaded_at)
 //   "dependencies" array of direct dependency names
 //   "dependents"   array of direct dependent names
+//   "optional_dependencies" / "optional_dependents" — the same two edges for
+//                  metadata.json#optional_dependencies, kept as separate keys
+//                  because the loader treats the two sets differently
 //   "metadata"     the module's full embedded metadata object (name, version,
 //                  type, description, dependencies, …), or null if unreadable
 // The returned string must be freed by the caller.

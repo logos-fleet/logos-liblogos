@@ -67,6 +67,11 @@ char** logos_core_get_module_dependencies(const char* module_name, bool recursiv
     return ModuleManager::getDependenciesCStr(module_name, recursive);
 }
 
+char** logos_core_get_module_optional_dependencies(const char* module_name) {
+    if (!module_name) { logos::logger("core").critical("logos_core_get_module_optional_dependencies: module_name must not be null"); std::abort(); }
+    return ModuleManager::getOptionalDependenciesCStr(module_name);
+}
+
 char** logos_core_get_module_dependents(const char* module_name, bool recursive) {
     if (!module_name) { logos::logger("core").critical("logos_core_get_module_dependents: module_name must not be null"); std::abort(); }
     return ModuleManager::getDependentsCStr(module_name, recursive);

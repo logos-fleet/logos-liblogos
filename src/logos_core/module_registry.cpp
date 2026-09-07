@@ -266,6 +266,7 @@ std::string ModuleRegistry::processModuleInternal(const std::string& modulePath,
     info.metadataJson = std::move(metadata->rawMetadataJson);
     info.version = metadata->version.toStdString();
     info.dependencies = toGateDependencies(metadata->dependencies);
+    info.optionalDependencies = toGateDependencies(metadata->optionalDependencies);
 
     return name;
 }
@@ -301,6 +302,8 @@ nlohmann::json ModuleRegistry::allModulesInfo() const {
         // Names only: the documented shape of this field (logos_core.h) and of
         // the modules_state snapshot record built from it.
         entry["dependencies"] = dependencyNames(info.dependencies);
+        entry["optional_dependencies"] = dependencyNames(info.optionalDependencies);
+        entry["optional_dependents"]   = info.optionalDependents;
         entry["dependents"]   = info.dependents;
         // Parse the cached metadata JSON back into structured form. Tolerate a
         // missing/garbled blob by reporting null rather than aborting the call.
@@ -328,6 +331,30 @@ ModuleRegistry::moduleDependencyEntries(const std::string& name) const {
     auto it = m_modules.find(name);
     return it != m_modules.end() ? it->second.dependencies
                                  : std::vector<LogosCore::ModuleDependency>{};
+}
+
+std::vector<std::string>
+ModuleRegistry::moduleOptionalDependencies(const std::string& name) const {
+    std::shared_lock lock(m_mutex);
+    auto it = m_modules.find(name);
+    return it != m_modules.end() ? dependencyNames(it->second.optionalDependencies)
+                                 : std::vector<std::string>{};
+}
+
+std::vector<LogosCore::ModuleDependency>
+ModuleRegistry::moduleOptionalDependencyEntries(const std::string& name) const {
+    std::shared_lock lock(m_mutex);
+    auto it = m_modules.find(name);
+    return it != m_modules.end() ? it->second.optionalDependencies
+                                 : std::vector<LogosCore::ModuleDependency>{};
+}
+
+std::vector<std::string>
+ModuleRegistry::moduleOptionalDependents(const std::string& name) const {
+    std::shared_lock lock(m_mutex);
+    auto it = m_modules.find(name);
+    return it != m_modules.end() ? it->second.optionalDependents
+                                 : std::vector<std::string>{};
 }
 
 std::string ModuleRegistry::moduleVersion(const std::string& name) const {
@@ -410,21 +437,30 @@ std::vector<std::string> ModuleRegistry::moduleDependentsLocked(const std::strin
 void ModuleRegistry::recomputeDependentsLocked() {
     // Wipe the reverse edges in place — we don't want to reallocate each
     // ModuleInfo, so clear() keeps any existing vector capacity.
-    for (auto& [k, v] : m_modules)
+    for (auto& [k, v] : m_modules) {
         v.dependents.clear();
+        v.optionalDependents.clear();
+    }
 
-    // Invert every forward edge. An entry whose dependency points at an
-    // unknown module is silently skipped — we can't register a reverse
-    // edge against something we don't track, and logging per-edge here
-    // would flood the log during every discovery pass.
-    for (const auto& [depender, info] : m_modules) {
-        for (const auto& entry : info.dependencies) {
+    // Invert every forward edge, keeping the two sets apart. An entry whose
+    // dependency points at an unknown module is silently skipped — we can't
+    // register a reverse edge against something we don't track, and logging
+    // per-edge here would flood the log during every discovery pass.
+    auto invert = [this](const std::string& depender,
+                         const std::vector<LogosCore::ModuleDependency>& forward,
+                         std::vector<std::string> ModuleInfo::*reverse) {
+        for (const auto& entry : forward) {
             auto depIt = m_modules.find(entry.name);
             if (depIt == m_modules.end()) continue;
-            auto& deps = depIt->second.dependents;
+            auto& deps = depIt->second.*reverse;
             if (std::find(deps.begin(), deps.end(), depender) == deps.end())
                 deps.push_back(depender);
         }
+    };
+
+    for (const auto& [depender, info] : m_modules) {
+        invert(depender, info.dependencies, &ModuleInfo::dependents);
+        invert(depender, info.optionalDependencies, &ModuleInfo::optionalDependents);
     }
 }
 
@@ -467,6 +503,13 @@ void ModuleRegistry::registerDependencies(
     const std::vector<LogosCore::ModuleDependency>& dependencies) {
     std::unique_lock lock(m_mutex);
     m_modules[name].dependencies = dependencies;
+    recomputeDependentsLocked();
+}
+
+void ModuleRegistry::registerOptionalDependencies(
+    const std::string& name, const std::vector<std::string>& optionalDependencies) {
+    std::unique_lock lock(m_mutex);
+    m_modules[name].optionalDependencies = toDependencyEntries(optionalDependencies);
     recomputeDependentsLocked();
 }
 
