@@ -9,6 +9,15 @@
     logos-protocol.url = "github:logos-co/logos-protocol";
     logos-qt-sdk.url = "github:logos-co/logos-qt-sdk";
     logos-plugin-qt.url = "github:logos-co/logos-plugin-qt";
+
+    # One logos-protocol and one logos-qt-host in the closure. logos-qt-host bakes
+    # sizeof(LogosAPIClient) into its `operator new` while logos-protocol defines the
+    # constructor, so a split pin splices a 88-byte allocation onto a 96-byte object.
+    logos-plugin-qt.inputs.logos-protocol.follows = "logos-protocol";
+    logos-qt-sdk.inputs.logos-protocol.follows = "logos-protocol";
+    logos-qt-sdk.inputs.logos-plugin-qt.follows = "logos-plugin-qt";
+    default-module-loader.inputs.logos-qt-sdk.follows = "logos-qt-sdk";
+    default-module-loader.inputs.logos-protocol.follows = "logos-protocol";
     logos-capability-module.url = "github:logos-co/logos-capability-module";
     logos-modules-state-module.url = "github:logos-co/logos-modules-state-module";
     logos-module.url = "github:logos-co/logos-module";
