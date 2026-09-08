@@ -192,7 +192,7 @@ The whole lifecycle in one `main()`:
   cannot read plugin metadata from a relative path).
 - `logos_core_init` → `logos_core_add_modules_dir` → `logos_core_start`
   (this discovers modules and brings up `capability_module`).
-- `logos_core_load_module(name, true)` loads the requested module and
+- `logos_core_load_module(name, LOGOS_LOAD_REQUIRED_DEPS)` loads the requested module and
   its dependencies; the module list accessors confirm what is up.
 
 ```cpp
@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
     printList("Discovered modules", logos_core_get_known_modules());
 
     printf("Loading '%s' (with dependencies)...\n", moduleName);
-    int ok = logos_core_load_module(moduleName, /*with_dependencies=*/true);
+    int ok = logos_core_load_module(moduleName, LOGOS_LOAD_REQUIRED_DEPS);
     printf("Load %s\n", ok ? "OK" : "FAILED");
     printList("Loaded modules", logos_core_get_loaded_modules());
 

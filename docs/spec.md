@@ -198,7 +198,7 @@ boundary: during processing (`ModuleRegistry::processModuleInternal`) a module w
 ### Dependency Resolution
 
 - Dependencies are declared in each module's `metadata.json`
-- `logos_core_load_module(name, true)` performs topological sort
+- `logos_core_load_module(name, LOGOS_LOAD_REQUIRED_DEPS)` performs topological sort
 - Circular dependencies are detected and cause the load to fail (returns 0)
 - Missing/unknown dependencies cause the load to fail (returns 0)
 - The resolver itself (`DependencyResolver::resolve`) returns a `ResolveResult` containing the partial topological order, a list of missing dependency names, and a cycle flag. The load path treats any resolution error as a hard failure; the teardown path (`unloadModuleWithDependents`) uses the partial order best-effort
@@ -209,13 +209,19 @@ boundary: during processing (`ModuleRegistry::processModuleInternal`) a module w
 
 `metadata.json#optional_dependencies` is a SECOND edge set: concrete modules a module can call but does not require. The registry keeps it, and its reverse edges, apart from `dependencies` — every statement above is about the required set, and each of the differences below is a place where merging them would be wrong.
 
-- **Not loaded.** `logos_core_load_module(name, true)` resolves and loads the required tree only. An optional dependency is never pulled in, so the caller (an app, `logoscore -l`, a package manager) owns its lifetime.
+- **Loaded only when asked for.** `logos_core_load_module(name, LOGOS_LOAD_REQUIRED_DEPS)` resolves and loads the required tree only. An optional dependency is never pulled in, so the caller (an app, `logoscore -l`, a package manager) owns its lifetime. `LOGOS_LOAD_REQUIRED_AND_OPTIONAL` opts into the opposite — see *Loading optional dependencies* below.
 - **Not a failure.** An optional dependency that is absent or unknown never appears in `ResolveResult::missing` and never fails a load.
-- **Ordering only, and only when it can.** `DependencyResolver::resolve` takes the optional edges as SOFT edges: they order modules already in the set — so an optional dependency requested in the same batch comes up first and the dependent's startup calls land — but they never expand it. A soft edge that would close a cycle is dropped, and `hasCycle` continues to reflect the required edges alone: breaking a cycle is what optional dependencies are for, so reporting one as a cycle would refuse the configuration the feature exists to allow.
+- **Ordering only, and only when it can.** Under `LOGOS_LOAD_REQUIRED_DEPS`, `DependencyResolver::resolve` takes the optional edges as SOFT edges: they order modules already in the set — so an optional dependency requested in the same batch comes up first and the dependent's startup calls land — but they never expand it. A soft edge that would close a cycle is dropped, and `hasCycle` continues to reflect the required edges alone: breaking a cycle is what optional dependencies are for, so reporting one as a cycle would refuse the configuration the feature exists to allow.
 - **No cascade.** `unloadModuleWithDependents` walks required reverse edges only. A module that declared it tolerates absence is not taken down when the thing it tolerates goes away.
 - **Still a caller.** Under `mode: "enforce"`, a loaded optional dependent IS in a target's derived allowed-caller list. The declaration is what grants the right to call; whether the loader had to supply the target is a separate question. Omitting them would deny a declared call between two loaded modules, and the caller would see a default value rather than an error.
 
 `logos_core_get_module_optional_dependencies(name)` reads the set. There is no `recursive` form: an optional edge says nothing about what lies beyond it.
+
+##### Loading optional dependencies
+
+`LOGOS_LOAD_REQUIRED_AND_OPTIONAL` expands the closure instead of merely ordering it (`DependencyResolver::OptionalLoad::BestEffort`): every optional dependency that is INSTALLED is loaded too, ordered ahead of the module that names it. It is transitive — an optional dependency brings its own required tree with it, and its own optional edges are considered in turn.
+
+Best effort in all three directions, and none of them changes the return value: one that is not installed is skipped silently, one that is installed but fails to load is logged and stepped over, and a branch whose own REQUIRED dependencies are not all installed is left out whole rather than half-loaded. `logos_core_optional_load_report(name)` returns, as JSON, which optional dependencies would be left out and why (`not_installed` or `unsatisfiable`).
 
 ### Process Monitoring
 
@@ -257,7 +263,7 @@ The platform supports two build variants:
 |----------|---------|
 | `logos_core_get_loaded_modules() → char**` | Return null-terminated array of loaded module names. Caller must free. |
 | `logos_core_get_known_modules() → char**` | Return null-terminated array of all discovered modules. Caller must free. |
-| `logos_core_load_module(name, with_dependencies) → int` | Load a module by name. When `with_dependencies` is true, resolves the dependency tree and loads in topological order. Returns 1 on success, 0 on failure. |
+| `logos_core_load_module(name, deps) → int` | Load a module by name. `deps` is a `LogosLoadDeps`: `LOGOS_LOAD_MODULE_ONLY` (0) loads the module alone and requires its dependencies to be up already; `LOGOS_LOAD_REQUIRED_DEPS` (1) resolves the required tree and loads in topological order; `LOGOS_LOAD_REQUIRED_AND_OPTIONAL` (2) additionally brings up every installed optional dependency, best effort. Returns 1 on success, 0 on failure. |
 | `logos_core_unload_module(name, with_dependents) → int` | Terminate the module's process and remove it. When `with_dependents` is true, cascade unloads every loaded transitive dependent leaves-first. Returns 1 only if every step succeeded. |
 | `logos_core_get_module_dependencies(name, recursive) → char**` | Return null-terminated array of modules that `name` depends on (forward edges). With `recursive=true`, walks the forward dependency graph transitively via BFS. Unknown names yield an empty array. Caller must free. |
 | `logos_core_get_module_dependents(name, recursive) → char**` | Return null-terminated array of modules that depend on `name` (reverse edges). With `recursive=true`, walks the reverse dependency graph transitively via BFS. Unknown names yield an empty array. Caller must free. |

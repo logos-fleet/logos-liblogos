@@ -170,7 +170,7 @@ on a specific container.
 | `processModule(path) → std::string` | Extract metadata from a module file, register as known |
 | `processModuleCStr(path) → char*` | C-string variant of processModule |
 | `loadModule(name) → bool` | Load a module (selects a loader via ModuleLoaderRegistry, spawns subprocess, sends auth token) |
-| `loadModuleWithDependencies(name) → bool` | Resolve dependency tree, load in topological order. Returns false if any dependency is unknown or a cycle is detected (hard failure on `!ResolveResult::ok()`) |
+| `loadModuleWithDependencies(name, optionalLoad = OrderOnly) → bool` | Resolve dependency tree, load in topological order. `optionalLoad` (`DependencyResolver::OptionalLoad`) decides whether installed optional dependencies are brought up alongside the target (`BestEffort`) or only used to order modules already in the set (`OrderOnly`); their failure never reaches the return value. Returns false if any REQUIRED dependency is unknown or a cycle is detected (hard failure on `!ResolveResult::ok()`) |
 | `initializeCapabilityModule() → bool` | Load the built-in capability module if available |
 | `unloadModule(name) → bool` | Terminate module process and update registry |
 | `unloadModuleWithDependents(name) → bool` | Cascade unload: terminate the named module together with every currently loaded module that transitively depends on it, leaves-first |
@@ -379,7 +379,7 @@ The public C API (`logos_core.h`) is the only exported interface. All functions 
 | `logos_core_set_persistence_base_path(path)` | Set base directory for module instance persistence |
 | `logos_core_set_module_transports(name, json)` | Register a per-module transport set (JSON, see logos-cpp-sdk shape). Forwarded to the child via `--transport-set` so its `LogosAPIProvider` binds every listener instead of only the global default LocalSocket. Must be called before the module is loaded; empty clears the entry |
 | `logos_core_set_access_policy(json)` | Install the inter-module access policy (version + mode + per-target `allowedCallers` allowlists). Core parses it and registers the per-target restrictions with capability_module, which denies token issuance (and thus calls) for disallowed callers when `mode` is `enforce`. Under enforce, restrictions are also auto-derived from the dependency graph (a module may only call its declared dependencies; allowed callers = loaded dependents + trusted `core`/`core_service`, re-pushed on load/unload); an explicit entry overrides the derived set for that target. Call before modules load; NULL/empty clears it |
-| `logos_core_load_module(name, with_dependencies) → int` | Load a module (1 = success, 0 = failure). When `with_dependencies` is true, resolves the dependency tree and loads in topological order |
+| `logos_core_load_module(name, deps) → int` | Load a module (1 = success, 0 = failure). `deps` is a `LogosLoadDeps`: `LOGOS_LOAD_MODULE_ONLY` (0) loads the module alone; `LOGOS_LOAD_REQUIRED_DEPS` (1) resolves the required tree and loads in topological order; `LOGOS_LOAD_REQUIRED_AND_OPTIONAL` (2) additionally brings up every installed optional dependency, best effort |
 | `logos_core_unload_module(name, with_dependents) → int` | Unload a module. When `with_dependents` is true, cascade unloads every loaded transitive dependent leaves-first. Returns 1 only if every step succeeded |
 | `logos_core_get_module_dependencies(name, recursive) → char**` | Modules that `name` depends on (forward edges). `recursive=true` walks the forward graph transitively. Unknown names yield an empty array. Caller frees |
 | `logos_core_get_module_dependents(name, recursive) → char**` | Modules that depend on `name` (reverse edges). `recursive=true` walks transitively. Unknown names yield an empty array. Caller frees |
@@ -518,7 +518,7 @@ int main(int argc, char *argv[]) {
     logos_core_add_modules_dir("/path/to/modules");
 
     logos_core_start();
-    logos_core_load_module("chat", false);
+    logos_core_load_module("chat", LOGOS_LOAD_MODULE_ONLY);
 
     char** loaded = logos_core_get_loaded_modules();
     for (int i = 0; loaded[i] != NULL; i++) {
@@ -534,8 +534,11 @@ int main(int argc, char *argv[]) {
 ### Loading with Dependencies
 
 ```c
-// Resolves the dependency tree and loads in correct order
-logos_core_load_module("my_module", true);
+// Resolves the required tree and loads in correct order
+logos_core_load_module("my_module", LOGOS_LOAD_REQUIRED_DEPS);
+
+// As above, plus every optional dependency that is installed (best effort)
+logos_core_load_module("my_module", LOGOS_LOAD_REQUIRED_AND_OPTIONAL);
 ```
 
 ## Continuous Integration
