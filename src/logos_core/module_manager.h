@@ -1,6 +1,7 @@
 #ifndef MODULE_MANAGER_H
 #define MODULE_MANAGER_H
 
+#include "dependency_resolver.h"
 #include "dependency_gate.h"
 #include "module_loader_registry.h"
 #include <string>
@@ -62,7 +63,12 @@ namespace ModuleManager {
     std::string processModule(const std::string& modulePath);
     char* processModuleCStr(const char* modulePath);
     bool loadModule(const char* moduleName);
-    bool loadModuleWithDependencies(const char* moduleName);
+    // `optionalLoad` decides whether optional dependencies that are INSTALLED
+    // are brought up alongside the target. Their failure never reaches the
+    // return value; see DependencyResolver::OptionalLoad.
+    bool loadModuleWithDependencies(const char* moduleName,
+                                    DependencyResolver::OptionalLoad optionalLoad =
+                                        DependencyResolver::OptionalLoad::OrderOnly);
     bool initializeCapabilityModule();
 
     // Loads modules_state when installed, arming the lifecycle feed. Returns
@@ -92,6 +98,17 @@ namespace ModuleManager {
     LogosCore::DependencyGateResult dependencyGateFor(const std::string& name);
 
     std::vector<std::string> resolveDependencies(const std::vector<std::string>& requestedModules);
+
+    // The optional branches LOGOS_LOAD_REQUIRED_AND_OPTIONAL would decline for
+    // `moduleName`, as a JSON array. Empty array when it would decline none.
+    std::string optionalLoadReportJson(const std::string& moduleName);
+    char* optionalLoadReportCStr(const char* moduleName);
+
+    // Resolve with OptionalLoad::BestEffort, reporting BOTH the order and the
+    // subset whose load failure a caller must tolerate. One call rather than
+    // two because the two answers come from one walk and must agree.
+    DependencyResolver::ResolveResult resolveDependenciesBestEffort(
+        const std::vector<std::string>& requestedModules);
 
     // Returns the declared dependencies of `name` among known modules.
     // Names that appear only in module metadata and are not known to the

@@ -40,7 +40,7 @@ protected:
 TEST_F(LoadVerdictTest, ChildDiesOnStartup_LoadReportsFailure) {
     plantModule("ghost", "die");
 
-    EXPECT_EQ(logos_core_load_module("ghost", false), 0);
+    EXPECT_EQ(logos_core_load_module("ghost", LOGOS_LOAD_MODULE_ONLY), 0);
     EXPECT_FALSE(logos_core_is_module_loaded("ghost"));
     EXPECT_EQ(loadedModuleNames().count("ghost"), 0u);
 }
@@ -51,7 +51,7 @@ TEST_F(LoadVerdictTest, ChildDiesOnStartup_LoadReportsFailure) {
 TEST_F(LoadVerdictTest, ChildDiesOnStartup_FeedReportsErrorAndNeverLoaded) {
     plantModule("ghost", "die");
 
-    ASSERT_EQ(logos_core_load_module("ghost", false), 0);
+    ASSERT_EQ(logos_core_load_module("ghost", LOGOS_LOAD_MODULE_ONLY), 0);
 
     EXPECT_FALSE(sawTransitionTo("ghost", logos::module_state::kLoaded));
     EXPECT_TRUE(sawTransitionTo("ghost", logos::module_state::kError));
@@ -63,7 +63,7 @@ TEST_F(LoadVerdictTest, ChildDiesOnStartup_FeedReportsErrorAndNeverLoaded) {
 TEST_F(LoadVerdictTest, HostReportsPluginFailure_LoadReportsFailureWithTheHostsReason) {
     plantModule("broken", "report-fail");
 
-    EXPECT_EQ(logos_core_load_module("broken", false), 0);
+    EXPECT_EQ(logos_core_load_module("broken", LOGOS_LOAD_MODULE_ONLY), 0);
     EXPECT_FALSE(logos_core_is_module_loaded("broken"));
     EXPECT_NE(reasonFor("broken", logos::module_state::kError)
                   .find("logos_module_install"),
@@ -75,7 +75,7 @@ TEST_F(LoadVerdictTest, HostReportsPluginFailure_LoadReportsFailureWithTheHostsR
 TEST_F(LoadVerdictTest, HostReportsLoaded_LoadSucceeds) {
     plantModule("healthy", "report-ok");
 
-    EXPECT_EQ(logos_core_load_module("healthy", false), 1);
+    EXPECT_EQ(logos_core_load_module("healthy", LOGOS_LOAD_MODULE_ONLY), 1);
     EXPECT_TRUE(logos_core_is_module_loaded("healthy"));
     EXPECT_TRUE(sawTransitionTo("healthy", logos::module_state::kLoaded));
 }
@@ -85,7 +85,7 @@ TEST_F(LoadVerdictTest, HostReportsLoaded_LoadSucceeds) {
 TEST_F(LoadVerdictTest, HostReportsNothing_LoadStillSucceeds) {
     plantModule("silent", "hang");
 
-    EXPECT_EQ(logos_core_load_module("silent", false), 1);
+    EXPECT_EQ(logos_core_load_module("silent", LOGOS_LOAD_MODULE_ONLY), 1);
     EXPECT_TRUE(logos_core_is_module_loaded("silent"));
 }
 
@@ -98,7 +98,7 @@ TEST_F(LoadVerdictTest, HostReportsNothing_LoadStillSucceeds) {
 TEST_F(LoadVerdictTest, HostThatLoadsThenDies_IsNotLeftMarkedLoaded) {
     plantModule("brief", "report-ok-then-die");
 
-    logos_core_load_module("brief", false);
+    logos_core_load_module("brief", LOGOS_LOAD_MODULE_ONLY);
 
     for (int i = 0; i < 200 && logos_core_is_module_loaded("brief"); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -131,7 +131,7 @@ protected:
 TEST_F(RealHostLoadVerdictTest, PluginNeverLoads_LoadReportsFailure) {
     plantModule("not_a_plugin", "this file is not a Qt plugin");
 
-    EXPECT_EQ(logos_core_load_module("not_a_plugin", false), 0);
+    EXPECT_EQ(logos_core_load_module("not_a_plugin", LOGOS_LOAD_MODULE_ONLY), 0);
     EXPECT_FALSE(logos_core_is_module_loaded("not_a_plugin"));
     EXPECT_EQ(loadedModuleNames().count("not_a_plugin"), 0u);
     EXPECT_FALSE(sawTransitionTo("not_a_plugin", logos::module_state::kLoaded));

@@ -16,12 +16,62 @@ namespace DependencyResolver {
     // true when the reachable graph contains a cycle (Kahn's algorithm
     // could not consume all nodes). Callers decide policy: load paths
     // treat !ok() as a hard failure; teardown paths may ignore it.
+    // An optional dependency best-effort loading left out. Reported rather than
+    // logged because "installed, and deliberately not loaded" is invisible
+    // otherwise: the module keeps whatever state it had, so nothing on the
+    // lifecycle feed marks it, and a caller comparing what it asked for against
+    // what came up has no way to tell this from an oversight.
+    struct SkippedOptional {
+        std::string module;   // the optional dependency that was left out
+        std::string namedBy;  // the module whose metadata names it
+        // "not_installed" — the optional dependency itself is not known here.
+        // "unsatisfiable"  — it is installed, but something it REQUIRES is not;
+        //                    `detail` carries the first such module.
+        std::string reason;
+        std::string detail;
+    };
+
     struct ResolveResult {
         std::vector<std::string> order;
         std::vector<std::string> missing;
         bool hasCycle = false;
 
+        // Names in `order` that are there ONLY because a best-effort optional
+        // edge pulled them in. A caller must tolerate their load failing;
+        // everything else in `order` is required by something.
+        //
+        // Empty unless OptionalLoad::BestEffort was asked for. A module that is
+        // ALSO reachable by a required edge is not listed: required wins, so a
+        // dependency that something genuinely needs never becomes tolerable
+        // just because a third module also named it optionally.
+        std::vector<std::string> bestEffort;
+
+        // Optional branches best-effort loading declined to take, in the order
+        // they were considered. Empty under OptionalLoad::OrderOnly, which
+        // declines nothing because it takes nothing.
+        std::vector<SkippedOptional> skippedOptional;
+
         bool ok() const { return missing.empty() && !hasCycle; }
+
+        bool isBestEffort(const std::string& name) const {
+            for (const std::string& n : bestEffort)
+                if (n == name) return true;
+            return false;
+        }
+    };
+
+    // What an optional dependency does to the CLOSURE. It never changes what a
+    // failure means: absent is not an error under either.
+    enum class OptionalLoad {
+        // Today's behaviour, and the default. Optional edges order modules
+        // already in the set and never add one.
+        OrderOnly,
+        // Additionally pull in every optional dependency that is KNOWN, so a
+        // dependent comes up with its optional collaborators when they are
+        // installed. An unknown one is skipped silently, and a known one that
+        // fails to load is reported through `bestEffort` rather than as a
+        // failure of the load.
+        BestEffort,
     };
 
     // `getOptionalDependencies` (metadata.json#optional_dependencies) supplies
@@ -41,7 +91,8 @@ namespace DependencyResolver {
     ResolveResult resolve(const std::vector<std::string>& requested,
                           IsKnownFn isKnown,
                           GetDependenciesFn getDependencies,
-                          GetDependenciesFn getOptionalDependencies = nullptr);
+                          GetDependenciesFn getOptionalDependencies = nullptr,
+                          OptionalLoad optionalLoad = OptionalLoad::OrderOnly);
 }
 
 #endif // DEPENDENCY_RESOLVER_H

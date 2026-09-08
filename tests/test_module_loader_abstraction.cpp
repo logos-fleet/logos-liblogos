@@ -130,7 +130,7 @@ protected:
 TEST_F(ModuleLoaderAbstractionTest, LoadModule_CallsFakeModuleLoaderLoad) {
     registerModule("foo");
 
-    int result = logos_core_load_module("foo", false);
+    int result = logos_core_load_module("foo", LOGOS_LOAD_MODULE_ONLY);
     ASSERT_EQ(result, 1);
 
     ASSERT_EQ(fake->loadCalls.size(), 1u);
@@ -140,7 +140,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadModule_CallsFakeModuleLoaderLoad) {
 TEST_F(ModuleLoaderAbstractionTest, LoadModule_CallsSendTokenAfterLoad) {
     registerModule("foo");
 
-    logos_core_load_module("foo", false);
+    logos_core_load_module("foo", LOGOS_LOAD_MODULE_ONLY);
 
     ASSERT_EQ(fake->sendTokenCalls.size(), 1u);
     EXPECT_EQ(fake->sendTokenCalls[0].first, "foo");
@@ -150,14 +150,14 @@ TEST_F(ModuleLoaderAbstractionTest, LoadModule_CallsSendTokenAfterLoad) {
 TEST_F(ModuleLoaderAbstractionTest, LoadModule_MarksModuleAsLoaded) {
     registerModule("foo");
 
-    logos_core_load_module("foo", false);
+    logos_core_load_module("foo", LOGOS_LOAD_MODULE_ONLY);
 
     EXPECT_EQ(logos_core_is_module_loaded("foo"), 1);
 }
 
 TEST_F(ModuleLoaderAbstractionTest, LoadModule_StoresLoaderInRegistry) {
     registerModule("foo");
-    logos_core_load_module("foo", false);
+    logos_core_load_module("foo", LOGOS_LOAD_MODULE_ONLY);
 
     auto rt = ModuleManager::registry().loaderFor("foo");
     EXPECT_EQ(rt.get(), fake.get());
@@ -165,7 +165,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadModule_StoresLoaderInRegistry) {
 
 TEST_F(ModuleLoaderAbstractionTest, UnloadModule_CallsFakeModuleLoaderTerminate) {
     registerModule("foo");
-    logos_core_load_module("foo", false);
+    logos_core_load_module("foo", LOGOS_LOAD_MODULE_ONLY);
 
     int result = logos_core_unload_module("foo", false);
     ASSERT_EQ(result, 1);
@@ -176,7 +176,7 @@ TEST_F(ModuleLoaderAbstractionTest, UnloadModule_CallsFakeModuleLoaderTerminate)
 
 TEST_F(ModuleLoaderAbstractionTest, UnloadModule_MarksModuleAsUnloaded) {
     registerModule("foo");
-    logos_core_load_module("foo", false);
+    logos_core_load_module("foo", LOGOS_LOAD_MODULE_ONLY);
     logos_core_unload_module("foo", false);
 
     EXPECT_EQ(logos_core_is_module_loaded("foo"), 0);
@@ -193,7 +193,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadWithDeps_LoadsInTopologicalOrder) {
     registerModule("b", {"a"});
     registerModule("c", {"b"});
 
-    int result = logos_core_load_module("c", true);
+    int result = logos_core_load_module("c", LOGOS_LOAD_REQUIRED_DEPS);
     ASSERT_EQ(result, 1);
 
     ASSERT_EQ(fake->loadCalls.size(), 3u);
@@ -206,10 +206,10 @@ TEST_F(ModuleLoaderAbstractionTest, LoadWithDeps_SkipsAlreadyLoadedModules) {
     registerModule("a");
     registerModule("b", {"a"});
 
-    logos_core_load_module("a", false);
+    logos_core_load_module("a", LOGOS_LOAD_MODULE_ONLY);
     fake->loadCalls.clear();
 
-    logos_core_load_module("b", true);
+    logos_core_load_module("b", LOGOS_LOAD_REQUIRED_DEPS);
 
     ASSERT_EQ(fake->loadCalls.size(), 1u);
     EXPECT_EQ(fake->loadCalls[0], "b");
@@ -217,7 +217,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadWithDeps_SkipsAlreadyLoadedModules) {
 
 // LoadsInTopologicalOrder (above) pins the *call sequence*. This one pins the
 // *observable end state*: requesting a single top-level module with
-// with_dependencies=true must leave that module's entire transitive
+// LOGOS_LOAD_REQUIRED_DEPS must leave that module's entire transitive
 // dependency closure loaded, as reported by the public query API. This is the
 // guarantee callers actually rely on ("load app, get everything it needs"),
 // and it exercises a diamond (app → ui, core; ui → core) so a dependency
@@ -233,7 +233,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadWithDeps_LeavesTransitiveClosureLoaded) 
     ASSERT_EQ(logos_core_is_module_loaded("core"), 0);
 
     // Only the top module is requested.
-    int result = logos_core_load_module("app", true);
+    int result = logos_core_load_module("app", LOGOS_LOAD_REQUIRED_DEPS);
     ASSERT_EQ(result, 1);
 
     // The whole closure ends up loaded — the deps were auto-resolved.
@@ -254,7 +254,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadWithDeps_LeavesTransitiveClosureLoaded) 
 
 TEST_F(ModuleLoaderAbstractionTest, TerminateAll_CallsFakeTerminateAll) {
     registerModule("foo");
-    logos_core_load_module("foo", false);
+    logos_core_load_module("foo", LOGOS_LOAD_MODULE_ONLY);
 
     logos_core_terminate_all();
 
@@ -270,7 +270,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadModule_ReturnsFalseWhenLoaderLoadFails) 
     registerModule("bad");
     fake->failOn.insert("bad");
 
-    int result = logos_core_load_module("bad", false);
+    int result = logos_core_load_module("bad", LOGOS_LOAD_MODULE_ONLY);
     EXPECT_EQ(result, 0);
 }
 
@@ -278,7 +278,7 @@ TEST_F(ModuleLoaderAbstractionTest, LoadModule_DoesNotCallSendTokenOnLoadFailure
     registerModule("bad");
     fake->failOn.insert("bad");
 
-    logos_core_load_module("bad", false);
+    logos_core_load_module("bad", LOGOS_LOAD_MODULE_ONLY);
 
     EXPECT_TRUE(fake->sendTokenCalls.empty());
 }
@@ -287,13 +287,13 @@ TEST_F(ModuleLoaderAbstractionTest, LoadModule_DoesNotMarkAsLoadedOnFailure) {
     registerModule("bad");
     fake->failOn.insert("bad");
 
-    logos_core_load_module("bad", false);
+    logos_core_load_module("bad", LOGOS_LOAD_MODULE_ONLY);
 
     EXPECT_EQ(logos_core_is_module_loaded("bad"), 0);
 }
 
 TEST_F(ModuleLoaderAbstractionTest, LoadModule_ReturnsFalseForUnknownModule) {
-    int result = logos_core_load_module("not_registered", false);
+    int result = logos_core_load_module("not_registered", LOGOS_LOAD_MODULE_ONLY);
     EXPECT_EQ(result, 0);
     EXPECT_TRUE(fake->loadCalls.empty());
 }

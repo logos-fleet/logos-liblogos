@@ -179,12 +179,12 @@ void killAndReap(pid_t pid) {
 TEST_F(ExpectedExitMarksTest, UnloadThenReloadThenCrash_IsReportedAsACrash) {
     plantModule("m");
 
-    ASSERT_EQ(logos_core_load_module("m", false), 1);
+    ASSERT_EQ(logos_core_load_module("m", LOGOS_LOAD_MODULE_ONLY), 1);
     ASSERT_GT(modulePid("m"), 0);
     ASSERT_EQ(logos_core_unload_module("m", false), 1);
     forgetPid("m");
 
-    ASSERT_EQ(logos_core_load_module("m", false), 1);
+    ASSERT_EQ(logos_core_load_module("m", LOGOS_LOAD_MODULE_ONLY), 1);
     const pid_t pid = modulePid("m");
     forgetTransitions();
     killAndReap(pid);
@@ -201,12 +201,12 @@ TEST_F(ExpectedExitMarksTest, UnloadThenReloadThenCrash_IsReportedAsACrash) {
 TEST_F(ExpectedExitMarksTest, TerminateAllThenReloadThenCrash_IsReportedAsACrash) {
     plantModule("m");
 
-    ASSERT_EQ(logos_core_load_module("m", false), 1);
+    ASSERT_EQ(logos_core_load_module("m", LOGOS_LOAD_MODULE_ONLY), 1);
     ASSERT_GT(modulePid("m"), 0);
     logos_core_terminate_all();
     forgetPid("m");
 
-    ASSERT_EQ(logos_core_load_module("m", false), 1);
+    ASSERT_EQ(logos_core_load_module("m", LOGOS_LOAD_MODULE_ONLY), 1);
     const pid_t pid = modulePid("m");
     forgetTransitions();
     killAndReap(pid);

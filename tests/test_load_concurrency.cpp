@@ -67,8 +67,8 @@ TEST_F(LoadConcurrencyTest, DifferentModulesLoadConcurrently) {
     plantModule("alpha", "slow-ok");
     plantModule("beta", "slow-ok");
 
-    std::thread a([] { logos_core_load_module("alpha", false); });
-    std::thread b([] { logos_core_load_module("beta", false); });
+    std::thread a([] { logos_core_load_module("alpha", LOGOS_LOAD_MODULE_ONLY); });
+    std::thread b([] { logos_core_load_module("beta", LOGOS_LOAD_MODULE_ONLY); });
     a.join();
     b.join();
 
@@ -107,8 +107,8 @@ TEST_F(LoadConcurrencyTest, ChainsSharingADependencyBringItUpOnce) {
     logos_core_register_module_dependencies("beta_app", dep, 1);
 
     std::atomic<int> succeeded{0};
-    std::thread a([&] { succeeded += logos_core_load_module("alpha_app", true); });
-    std::thread b([&] { succeeded += logos_core_load_module("beta_app", true); });
+    std::thread a([&] { succeeded += logos_core_load_module("alpha_app", LOGOS_LOAD_REQUIRED_DEPS); });
+    std::thread b([&] { succeeded += logos_core_load_module("beta_app", LOGOS_LOAD_REQUIRED_DEPS); });
     a.join();
     b.join();
 
@@ -129,8 +129,8 @@ TEST_F(LoadConcurrencyTest, SameModuleLoadsOnlyOnce) {
     plantModule("solo", "slow-ok");
 
     std::atomic<int> succeeded{0};
-    std::thread a([&] { succeeded += logos_core_load_module("solo", false); });
-    std::thread b([&] { succeeded += logos_core_load_module("solo", false); });
+    std::thread a([&] { succeeded += logos_core_load_module("solo", LOGOS_LOAD_MODULE_ONLY); });
+    std::thread b([&] { succeeded += logos_core_load_module("solo", LOGOS_LOAD_MODULE_ONLY); });
     a.join();
     b.join();
 
@@ -166,7 +166,7 @@ public:
               LogosCore::LoadedModuleHandle& out) override {
         if (!inner.empty() && !reentered) {
             reentered = true;
-            innerResult = logos_core_load_module(inner.c_str(), false);
+            innerResult = logos_core_load_module(inner.c_str(), LOGOS_LOAD_MODULE_ONLY);
         }
         out.name = desc.name;
         out.pid = 4321;
@@ -217,7 +217,7 @@ TEST_F(LoadReentrancyTest, ALoadStartedInsideALoadIsRefused) {
     registerModule("inner");
     loader->inner = "inner";
 
-    EXPECT_EQ(logos_core_load_module("outer", false), 1);
+    EXPECT_EQ(logos_core_load_module("outer", LOGOS_LOAD_MODULE_ONLY), 1);
 
     ASSERT_TRUE(loader->reentered) << "the loader never re-entered, so this "
                                      "asserts nothing about re-entrancy";
@@ -231,10 +231,10 @@ TEST_F(LoadReentrancyTest, ALoadStartedInsideALoadIsRefused) {
 TEST_F(LoadReentrancyTest, AReentrantLoadOfAnAlreadyLoadedModuleStillSucceeds) {
     registerModule("outer");
     registerModule("prior");
-    ASSERT_EQ(logos_core_load_module("prior", false), 1);
+    ASSERT_EQ(logos_core_load_module("prior", LOGOS_LOAD_MODULE_ONLY), 1);
 
     loader->inner = "prior";
-    EXPECT_EQ(logos_core_load_module("outer", false), 1);
+    EXPECT_EQ(logos_core_load_module("outer", LOGOS_LOAD_MODULE_ONLY), 1);
 
     ASSERT_TRUE(loader->reentered);
     EXPECT_EQ(loader->innerResult, 1);

@@ -267,7 +267,7 @@ TEST_F(ModuleManagerTest, GetKnownModulesCStr_ReturnsCorrectArray) {
 // =============================================================================
 
 TEST_F(ModuleManagerTest, LoadModule_ReturnsFalseForUnknownModule) {
-    int result = logos_core_load_module("nonexistent_module", false);
+    int result = logos_core_load_module("nonexistent_module", LOGOS_LOAD_MODULE_ONLY);
     EXPECT_EQ(result, 0);
 }
 
@@ -351,15 +351,15 @@ TEST_F(ModuleManagerTest, ResolveDependencies_HandlesTransitiveDeps) {
 }
 
 // =============================================================================
-// C API: logos_core_load_module with_dependencies=true Tests
+// C API: logos_core_load_module LOGOS_LOAD_REQUIRED_DEPS Tests
 // =============================================================================
 
 TEST_F(ModuleManagerTest, LoadModuleWithDeps_AbortsForNull) {
-    EXPECT_DEATH(logos_core_load_module(nullptr, true), "");
+    EXPECT_DEATH(logos_core_load_module(nullptr, LOGOS_LOAD_REQUIRED_DEPS), "");
 }
 
 TEST_F(ModuleManagerTest, LoadModuleWithDeps_ReturnsZeroForUnknown) {
-    int result = logos_core_load_module("unknown_module", true);
+    int result = logos_core_load_module("unknown_module", LOGOS_LOAD_REQUIRED_DEPS);
     EXPECT_EQ(result, 0);
 }
 
@@ -386,11 +386,11 @@ TEST_F(ModuleManagerTest, LoadModule_ReturnsTrueWhenAlreadyLoaded) {
     ASSERT_EQ(logos_core_is_module_loaded("preloaded"), 1);
 
     // First call: module is already loaded ⇒ no-op success.
-    EXPECT_EQ(logos_core_load_module("preloaded", false), 1)
+    EXPECT_EQ(logos_core_load_module("preloaded", LOGOS_LOAD_MODULE_ONLY), 1)
         << "loading an already-loaded module must return 1 (no-op success)";
 
     // Repeating the call must stay idempotent — still success, still loaded.
-    EXPECT_EQ(logos_core_load_module("preloaded", false), 1);
+    EXPECT_EQ(logos_core_load_module("preloaded", LOGOS_LOAD_MODULE_ONLY), 1);
     EXPECT_EQ(logos_core_is_module_loaded("preloaded"), 1);
 }
 
@@ -403,18 +403,72 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_ReturnsTrueWhenAllAlreadyLoaded) {
     logos_core_mark_module_loaded("child");
     logos_core_mark_module_loaded("parent");
 
-    // with_dependencies=true walks the resolved order and calls
+    // LOGOS_LOAD_REQUIRED_DEPS walks the resolved order and calls
     // loadModuleInternal for each; every step short-circuits on
     // isLoaded() and returns true, so the overall call returns 1.
-    EXPECT_EQ(logos_core_load_module("parent", true), 1)
-        << "with_dependencies=true must return 1 when the target and "
+    EXPECT_EQ(logos_core_load_module("parent", LOGOS_LOAD_REQUIRED_DEPS), 1)
+        << "LOGOS_LOAD_REQUIRED_DEPS must return 1 when the target and "
            "all of its deps were already loaded before the call";
     EXPECT_EQ(logos_core_is_module_loaded("parent"), 1);
     EXPECT_EQ(logos_core_is_module_loaded("child"),  1);
 }
 
+// LOGOS_LOAD_REQUIRED_AND_OPTIONAL: the whole point is that a failure here is
+// not a failure of the call. These two run together — the second is what makes
+// the first mean anything, since a test that tolerates everything tolerates
+// nothing in particular.
+TEST_F(ModuleManagerTest, BestEffort_AFailingOptionalDependencyDoesNotFailTheLoad) {
+    logos_core_register_module("app", "/fake/app");
+    logos_core_register_module("extra", "/fake/extra");
+    const char* optApp[] = {"extra"};
+    logos_core_register_module_optional_dependencies("app", optApp, 1);
+    // `app` itself is already up, so the only load attempted is `extra`'s —
+    // and there is no plugin at /fake/extra, so it fails.
+    logos_core_mark_module_loaded("app");
+
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_REQUIRED_AND_OPTIONAL), 1)
+        << "an INSTALLED optional dependency that fails to load must not fail "
+           "the load of the module that merely names it";
+    EXPECT_EQ(logos_core_is_module_loaded("app"), 1);
+    EXPECT_EQ(logos_core_is_module_loaded("extra"), 0)
+        << "it really did fail — otherwise this test proves nothing";
+}
+
+TEST_F(ModuleManagerTest, BestEffort_AnOptionalDepWhoseOwnRequiredDepIsMissingIsNotFatal) {
+    // app -opt-> extra -req-> ghost(not installed).
+    // `extra` is unloadable, but `app` only NAMED it as optional. Nothing here
+    // may fail app's load — the resolver reports `ghost` as missing, and
+    // missing is what loadModuleWithDependencies treats as a hard failure.
+    logos_core_register_module("app", "/fake/app");
+    logos_core_register_module("extra", "/fake/extra");
+    const char* optApp[] = {"extra"};
+    logos_core_register_module_optional_dependencies("app", optApp, 1);
+    const char* depsExtra[] = {"ghost"};
+    logos_core_register_module_dependencies("extra", depsExtra, 1);
+    logos_core_mark_module_loaded("app");
+
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_REQUIRED_AND_OPTIONAL), 1)
+        << "an optional dependency that cannot be satisfied must be left out, "
+           "not turned into a resolution failure for the module naming it";
+    EXPECT_EQ(logos_core_is_module_loaded("app"), 1);
+}
+
+TEST_F(ModuleManagerTest, BestEffort_TheSameFailureIsStillFatalForARequiredDependency) {
+    logos_core_register_module("app", "/fake/app");
+    logos_core_register_module("extra", "/fake/extra");
+    const char* deps[] = {"extra"};
+    logos_core_register_module_dependencies("app", deps, 1);
+    logos_core_mark_module_loaded("app");
+
+    // Identical fixture, one word changed: `extra` is REQUIRED. The tolerance
+    // above is specific to the optional kind, not a test that cannot fail.
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_REQUIRED_AND_OPTIONAL), 0)
+        << "a REQUIRED dependency failing must still fail the load, even when "
+           "best-effort optional loading is asked for";
+}
+
 // =============================================================================
-// Dependency resolution failure: logos_core_load_module(name, true) must
+// Dependency resolution failure: logos_core_load_module(name, LOGOS_LOAD_REQUIRED_DEPS) must
 // return 0 when the dependency graph cannot be fully resolved.
 //
 // The resolver silently drops unknown modules and detects cycles. Before
@@ -431,7 +485,7 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_FailsWhenDirectDependencyUnknown) {
     logos_core_register_module_dependencies("parent", deps, 1);
 
     // "unknown_dep" is not registered → resolution has missing deps → fail.
-    EXPECT_EQ(logos_core_load_module("parent", true), 0)
+    EXPECT_EQ(logos_core_load_module("parent", LOGOS_LOAD_REQUIRED_DEPS), 0)
         << "must return 0 when a direct dependency is unknown";
 }
 
@@ -444,7 +498,7 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_FailsWhenTransitiveDependencyUnknow
     logos_core_register_module_dependencies("mid", depsMid, 1);
 
     // "bottom_unknown" not registered → transitive resolution fails.
-    EXPECT_EQ(logos_core_load_module("top", true), 0)
+    EXPECT_EQ(logos_core_load_module("top", LOGOS_LOAD_REQUIRED_DEPS), 0)
         << "must return 0 when a transitive dependency is unknown";
 }
 
@@ -457,7 +511,7 @@ TEST_F(ModuleManagerTest, LoadModuleWithDeps_FailsOnCircularDependency) {
     logos_core_register_module_dependencies("cyc_b", depsB, 1);
 
     // Cycle detected → must return 0.
-    EXPECT_EQ(logos_core_load_module("cyc_a", true), 0)
+    EXPECT_EQ(logos_core_load_module("cyc_a", LOGOS_LOAD_REQUIRED_DEPS), 0)
         << "must return 0 when a circular dependency is detected";
 }
 
@@ -715,7 +769,7 @@ protected:
 TEST_F(DependencyGateLoadTest, UnsatisfiedRange_RefusesLoad) {
     plantGraph("^2.0.0", "1.0.0");
 
-    EXPECT_EQ(logos_core_load_module("app", /*with_dependencies=*/false), 0);
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_MODULE_ONLY), 0);
     EXPECT_EQ(logos_core_is_module_loaded("app"), 0);
 
     const std::string reason = errorReason("app");
@@ -727,7 +781,7 @@ TEST_F(DependencyGateLoadTest, UnsatisfiedRange_RefusesLoad) {
 TEST_F(DependencyGateLoadTest, MalformedRange_RefusesLoad) {
     plantGraph("^^2.0.0", "2.1.0");
 
-    EXPECT_EQ(logos_core_load_module("app", /*with_dependencies=*/false), 0);
+    EXPECT_EQ(logos_core_load_module("app", LOGOS_LOAD_MODULE_ONLY), 0);
 
     const std::string reason = errorReason("app");
     EXPECT_NE(reason.find("unparseable"), std::string::npos) << reason;

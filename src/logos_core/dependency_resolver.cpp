@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <unordered_map>
+#include <algorithm>
 #include <deque>
 #include <functional>
 #include <string>
@@ -61,8 +62,12 @@ namespace DependencyResolver {
     ResolveResult resolve(const std::vector<std::string>& requested,
                           IsKnownFn isKnown,
                           GetDependenciesFn getDependencies,
-                          GetDependenciesFn getOptionalDependencies) {
+                          GetDependenciesFn getOptionalDependencies,
+                          OptionalLoad optionalLoad) {
         ResolveResult out;
+
+        const bool bestEffort =
+            optionalLoad == OptionalLoad::BestEffort && getOptionalDependencies;
 
         std::unordered_set<std::string> modulesToLoad;
         std::deque<std::string> queue(requested.begin(), requested.end());
@@ -87,6 +92,7 @@ namespace DependencyResolver {
                     queue.push_back(depName);
                 }
             }
+
         }
 
         if (!out.missing.empty()) {
@@ -96,6 +102,100 @@ namespace DependencyResolver {
                 joined += out.missing[i];
             }
             spdlog::warn("Missing dependencies detected: {}", joined);
+        }
+
+        // Best effort runs as a SECOND pass, over the required closure above.
+        //
+        // Not inline in that walk, and this is the whole of the difference: a
+        // queued name that is not installed becomes `missing`, and `missing` is
+        // a hard failure. Expanding optional edges in the same queue therefore
+        // makes an optional dependency's own unsatisfiable subtree fail the
+        // load of the module that merely NAMED it — which is the property this
+        // dependency kind exists to prevent. Measured before it was fixed: with
+        // app -opt-> extra -req-> ghost(absent), loading `app` returned 0.
+        //
+        // So a branch is admitted only if it is WHOLLY satisfiable: every
+        // module in the optional dependency's own required closure is
+        // installed. If any is not, the branch is dropped entire — loading a
+        // module whose dependencies are missing would only fail later, noisily,
+        // for something nobody required.
+        //
+        // Fixed point, so an optional dependency of an optional dependency is
+        // reached on a later round.
+        if (bestEffort) {
+            std::unordered_set<std::string> reportedSkips;
+            bool grew = true;
+            while (grew) {
+                grew = false;
+                std::vector<std::string> frontier(modulesToLoad.begin(), modulesToLoad.end());
+                for (const std::string& holder : frontier) {
+                    for (const std::string& optName : getOptionalDependencies(holder)) {
+                        if (optName.empty() || modulesToLoad.count(optName))
+                            continue;
+
+                        // The candidate branch: `optName` and everything it
+                        // REQUIRES, gathered before anything is committed.
+                        std::unordered_set<std::string> branch;
+                        std::deque<std::string> probe{optName};
+                        std::string blocker;
+                        while (!probe.empty() && blocker.empty()) {
+                            std::string n = probe.front();
+                            probe.pop_front();
+                            if (branch.count(n) || modulesToLoad.count(n))
+                                continue;
+                            if (!isKnown(n)) { blocker = n; break; }
+                            branch.insert(n);
+                            for (const std::string& d : getDependencies(n))
+                                if (!d.empty() && !branch.count(d) && !modulesToLoad.count(d))
+                                    probe.push_back(d);
+                        }
+
+                        if (!blocker.empty()) {
+                            // Reported once per (holder, optional) pair: the
+                            // fixed-point loop revisits every holder each round,
+                            // and a declined branch stays declined.
+                            const std::string key = holder + '\0' + optName;
+                            if (reportedSkips.insert(key).second) {
+                                out.skippedOptional.push_back(SkippedOptional{
+                                    optName, holder,
+                                    blocker == optName ? "not_installed" : "unsatisfiable",
+                                    blocker == optName ? std::string{} : blocker});
+                                spdlog::debug("Optional dependency '{}' of '{}' left out: {} is not installed",
+                                              optName, holder, blocker);
+                            }
+                            continue;
+                        }
+                        for (const std::string& n : branch)
+                            modulesToLoad.insert(n);
+                        grew = grew || !branch.empty();
+                    }
+                }
+            }
+        }
+
+        // Which of those are tolerable to fail: everything the REQUIRED edges
+        // alone could not have reached. Computed by re-walking the hard graph
+        // from `requested` and subtracting, rather than by tagging nodes as
+        // they are queued, because a module can be reached BOTH ways and the
+        // order in which the queue happens to reach it must not decide whether
+        // its failure is fatal. Required wins, always.
+        if (bestEffort) {
+            std::unordered_set<std::string> requiredOnly;
+            std::deque<std::string> hardQueue(requested.begin(), requested.end());
+            while (!hardQueue.empty()) {
+                std::string n = hardQueue.front();
+                hardQueue.pop_front();
+                if (requiredOnly.count(n) || !isKnown(n))
+                    continue;
+                requiredOnly.insert(n);
+                for (const std::string& depName : getDependencies(n))
+                    if (!depName.empty() && !requiredOnly.count(depName))
+                        hardQueue.push_back(depName);
+            }
+            for (const std::string& n : modulesToLoad)
+                if (!requiredOnly.count(n))
+                    out.bestEffort.push_back(n);
+            std::sort(out.bestEffort.begin(), out.bestEffort.end());
         }
 
         // Hard edges decide BOTH the closure and whether this is a cycle.

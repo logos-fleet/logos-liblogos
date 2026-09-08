@@ -55,21 +55,56 @@ LOGOS_CORE_EXPORT char** logos_core_get_loaded_modules();
 // Returns a null-terminated array of module names that must be freed by the caller
 LOGOS_CORE_EXPORT char** logos_core_get_known_modules();
 
+// How far logos_core_load_module walks the dependency graph.
+//
+// An ENUM rather than a second bool: "best effort optional" means nothing
+// unless dependencies are being resolved at all, and two independent bools
+// would let a caller ask for a combination that does not exist.
+//
+// THE FIRST TWO VALUES ARE 0 AND 1 ON PURPOSE. This replaced a
+// `bool with_dependencies`, and under C linkage the symbol mangles the same
+// either way — a consumer that hand-copies the old prototype (logos-standalone-app
+// does, in an extern "C" block) keeps compiling AND linking against the new
+// library with no diagnostic anywhere. Pinning false→MODULE_ONLY and
+// true→REQUIRED_DEPS makes that silent case keep its old behaviour exactly,
+// so a consumer that has not bumped yet is stale rather than broken. Do not
+// renumber these.
+typedef enum {
+    // Load this module alone. Its dependencies must already be up.
+    LOGOS_LOAD_MODULE_ONLY = 0,
+    // Resolve and load the REQUIRED tree in topological order first. Optional
+    // dependencies are not loaded, and a missing one is not a failure.
+    LOGOS_LOAD_REQUIRED_DEPS = 1,
+    // As above, and additionally load every optional dependency that is
+    // INSTALLED, ordered ahead of the module that names it.
+    //
+    // Best effort in every direction that can go wrong: one that is not
+    // installed is skipped in silence, one that is installed but FAILS to load
+    // is logged and stepped over, and one whose OWN required dependencies are
+    // not all installed is left out entirely. None of the three changes the
+    // return value — nothing requires these, which is what makes them optional.
+    //
+    // TRANSITIVE, and admitted whole or not at all. An optional dependency
+    // brings its own required dependencies with it, and its own optional ones
+    // are considered in turn. A branch joins only if every module it REQUIRES
+    // is installed: half of one would just fail at load time for something
+    // nobody asked for. Use it to bring a module up alongside collaborators
+    // that happen to be present, without making its startup contingent on them.
+    LOGOS_LOAD_REQUIRED_AND_OPTIONAL = 2,
+} LogosLoadDeps;
+
 // Load a specific module by name.
-// Optional dependencies are never part of this: with_dependencies resolves and
-// loads the REQUIRED tree only, and a missing optional dependency is not a
-// resolution failure.
-// When with_dependencies is true, resolves the dependency tree and loads
-// modules in correct topological order before loading the target.
+// `deps` decides how far the graph is walked; see LogosLoadDeps above.
 //
 // Semantics: "ensure loaded", not "load fresh". Returns 1 when all
 // required modules end up loaded — including the case where the target
-// (or, with with_dependencies=true, any of its deps) was already loaded
+// (or, when resolving, any of its REQUIRED deps) was already loaded
 // before the call. This idempotency is load-bearing for callers that
 // use it as a guard ("make sure X is up before I use it").
 // Returns 0 only when the module is unknown, dependency resolution
 // fails, an actual load step (not an already-loaded no-op) fails, or the
-// call is RE-ENTRANT — see the concurrency note below.
+// call is RE-ENTRANT — see the concurrency note below. A best-effort optional
+// dependency failing to load is none of those.
 // Aborts the process if `module_name` is NULL.
 //
 // "Loaded" here means the module's plugin loaded in its host process, not
@@ -102,7 +137,24 @@ LOGOS_CORE_EXPORT char** logos_core_get_known_modules();
 // running its event loop. A caller that needs the registration to have
 // happened before it proceeds should load from the owner thread, where it
 // still runs inline and in order.
-LOGOS_CORE_EXPORT int logos_core_load_module(const char* module_name, bool with_dependencies);
+LOGOS_CORE_EXPORT int logos_core_load_module(const char* module_name, LogosLoadDeps deps);
+
+// Which optional dependencies LOGOS_LOAD_REQUIRED_AND_OPTIONAL would leave out
+// for `module_name`, and why. Returns a JSON array; each element is an object:
+//   "module"    the optional dependency that would not be loaded
+//   "named_by"  the module whose metadata names it optionally
+//   "reason"    "not_installed" — it is not installed here
+//               "unsatisfiable" — it is, but something it REQUIRES is not
+//   "missing"   present only for "unsatisfiable": the module that is absent
+// Returns "[]" when nothing would be left out. The string must be freed by
+// the caller. Aborts the process if `module_name` is NULL.
+//
+// A QUERY rather than an out-parameter on the load, because a skipped module
+// is otherwise invisible: it keeps whatever state it had, so nothing appears on
+// the lifecycle feed and nothing distinguishes "deliberately left out" from
+// "nobody ever asked for it". Deterministic given what is installed, so calling
+// it before a load predicts, and calling it after explains.
+LOGOS_CORE_EXPORT char* logos_core_optional_load_report(const char* module_name);
 
 // Unload a specific module by name.
 // When with_dependents is true, also unloads every loaded module that

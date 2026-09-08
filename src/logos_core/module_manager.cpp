@@ -1197,7 +1197,10 @@ namespace ModuleManager {
         return loadModuleInternal(moduleName);
     }
 
-    bool loadModuleWithDependencies(const char* moduleName) {
+    // The default for `optionalLoad` lives on the declaration in
+    // module_manager.h; repeating it here would not compile.
+    bool loadModuleWithDependencies(const char* moduleName,
+                                    DependencyResolver::OptionalLoad optionalLoad) {
         // BEFORE the lock guard, so it is destroyed after it. See rule 1.
         logos::ScopedModuleStateFlush stateFlusher;
         ScopedLoadEntry entry;
@@ -1216,7 +1219,8 @@ namespace ModuleManager {
             requested,
             [](const std::string& n) { return registryInstance().isKnown(n); },
             [](const std::string& n) { return registryInstance().moduleDependencies(n); },
-            [](const std::string& n) { return registryInstance().moduleOptionalDependencies(n); }
+            [](const std::string& n) { return registryInstance().moduleOptionalDependencies(n); },
+            optionalLoad
         );
 
         // Treat missing dependencies and cycles as hard failures.
@@ -1240,10 +1244,22 @@ namespace ModuleManager {
 
         bool allSucceeded = true;
         for (const std::string& moduleName : resolved.order) {
-            if (!loadModuleInternal(moduleName.c_str())) {
-                spdlog::warn("Failed to load module: {}", moduleName);
-                allSucceeded = false;
+            if (loadModuleInternal(moduleName.c_str()))
+                continue;
+
+            // A best-effort optional dependency is in this order because it was
+            // INSTALLED, not because anything needs it. Its failure is the case
+            // the caller asked to tolerate, so it must not reach the return
+            // value — the header's contract is "all REQUIRED modules ended up
+            // loaded", and this module is required by nobody.
+            if (resolved.isBestEffort(moduleName)) {
+                spdlog::warn("Optional dependency failed to load, continuing without it: {}",
+                             moduleName);
+                continue;
             }
+
+            spdlog::warn("Failed to load module: {}", moduleName);
+            allSucceeded = false;
         }
 
         return allSucceeded;
@@ -1479,6 +1495,40 @@ namespace ModuleManager {
             [](const std::string& name) { return registryInstance().moduleDependencies(name); },
             [](const std::string& n) { return registryInstance().moduleOptionalDependencies(n); }
         ).order;
+    }
+
+    DependencyResolver::ResolveResult resolveDependenciesBestEffort(
+        const std::vector<std::string>& requestedModules) {
+        return DependencyResolver::resolve(
+            requestedModules,
+            [](const std::string& name) { return registryInstance().isKnown(name); },
+            [](const std::string& name) { return registryInstance().moduleDependencies(name); },
+            [](const std::string& n) { return registryInstance().moduleOptionalDependencies(n); },
+            DependencyResolver::OptionalLoad::BestEffort
+        );
+    }
+
+    std::string optionalLoadReportJson(const std::string& moduleName) {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& s : resolveDependenciesBestEffort({moduleName}).skippedOptional) {
+            nlohmann::json entry;
+            entry["module"] = s.module;
+            entry["named_by"] = s.namedBy;
+            entry["reason"] = s.reason;
+            // Present only when there is one to name: "not_installed" is about
+            // the optional dependency itself and has no third module to blame.
+            if (!s.detail.empty())
+                entry["missing"] = s.detail;
+            out.push_back(std::move(entry));
+        }
+        return out.dump();
+    }
+
+    char* optionalLoadReportCStr(const char* moduleName) {
+        std::string json = optionalLoadReportJson(std::string(moduleName));
+        char* result = new char[json.size() + 1];
+        strcpy(result, json.c_str());
+        return result;
     }
 
     std::vector<std::string> getDependencies(const std::string& name, bool recursive) {

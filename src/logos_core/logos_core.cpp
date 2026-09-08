@@ -44,15 +44,34 @@ char** logos_core_get_known_modules() {
     return ModuleManager::getKnownModulesCStr();
 }
 
-int logos_core_load_module(const char* module_name, bool with_dependencies) {
+int logos_core_load_module(const char* module_name, LogosLoadDeps deps) {
     if (!module_name) { logos::logger("core").critical("logos_core_load_module: module_name must not be null"); std::abort(); }
     // "Already loaded ⇒ success" is implemented in
     // ModuleManager::loadModuleInternal (see the block at the top there
     // for the rationale and the dep-tree fast path). The header doc
     // documents this as part of the public contract — keep both in sync.
-    if (with_dependencies)
-        return ModuleManager::loadModuleWithDependencies(module_name) ? 1 : 0;
-    return ModuleManager::loadModule(module_name) ? 1 : 0;
+    switch (deps) {
+    case LOGOS_LOAD_REQUIRED_AND_OPTIONAL:
+        return ModuleManager::loadModuleWithDependencies(
+                   module_name, DependencyResolver::OptionalLoad::BestEffort) ? 1 : 0;
+    case LOGOS_LOAD_REQUIRED_DEPS:
+        return ModuleManager::loadModuleWithDependencies(
+                   module_name, DependencyResolver::OptionalLoad::OrderOnly) ? 1 : 0;
+    case LOGOS_LOAD_MODULE_ONLY:
+        return ModuleManager::loadModule(module_name) ? 1 : 0;
+    }
+    // An out-of-range enum is a caller bug, and loading the required tree is
+    // the answer that surprises least: it is what every caller of the old
+    // `with_dependencies=true` asked for.
+    logos::logger("core").warn("logos_core_load_module: unrecognised LogosLoadDeps {}; "
+                               "treating as LOGOS_LOAD_REQUIRED_DEPS", static_cast<int>(deps));
+    return ModuleManager::loadModuleWithDependencies(
+               module_name, DependencyResolver::OptionalLoad::OrderOnly) ? 1 : 0;
+}
+
+char* logos_core_optional_load_report(const char* module_name) {
+    if (!module_name) { logos::logger("core").critical("logos_core_optional_load_report: module_name must not be null"); std::abort(); }
+    return ModuleManager::optionalLoadReportCStr(module_name);
 }
 
 int logos_core_unload_module(const char* module_name, bool with_dependents) {
