@@ -7,8 +7,17 @@
     logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk";
     logos-cpp-sdk.inputs.logos-protocol.follows = "logos-protocol";
     logos-protocol.url = "github:logos-co/logos-protocol";
+    # ONE logos-protocol, and ONE logos-qt-host, in the closure. qt-host bakes
+    # sizeof(LogosAPIClient) into its own `operator new` while logos-protocol
+    # defines the constructor, so a second protocol here is an 8-byte heap
+    # overrun on every getClient(), not a version disagreement. Without these,
+    # an --override-input on our logos-protocol reaches only the direct edge and
+    # leaves qt-sdk's and plugin-qt's copies behind.
     logos-qt-sdk.url = "github:logos-co/logos-qt-sdk";
+    logos-qt-sdk.inputs.logos-protocol.follows = "logos-protocol";
+    logos-qt-sdk.inputs.logos-plugin-qt.follows = "logos-plugin-qt";
     logos-plugin-qt.url = "github:logos-co/logos-plugin-qt";
+    logos-plugin-qt.inputs.logos-protocol.follows = "logos-protocol";
     logos-capability-module.url = "github:logos-co/logos-capability-module";
     logos-modules-state-module.url = "github:logos-co/logos-modules-state-module";
     logos-module.url = "github:logos-co/logos-module";
