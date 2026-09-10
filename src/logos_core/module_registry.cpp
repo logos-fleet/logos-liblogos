@@ -269,9 +269,11 @@ std::string ModuleRegistry::addEmbeddedBareModule(const std::string& metadataJso
 
     // Not a load — see the header. This only refuses a path that names
     // nothing, so a typo in an app's staging code fails HERE, where the app
-    // can report it, rather than at the first load attempt.
+    // can report it, rather than at the first load attempt. The non-throwing
+    // overload returns false and sets `ec` for an empty or unreadable path
+    // alike, so one negation covers every way of not being there.
     std::error_code ec;
-    if (imagePath.empty() || !std::filesystem::is_regular_file(imagePath, ec) || ec) {
+    if (!std::filesystem::is_regular_file(imagePath, ec)) {
         spdlog::warn("Rejecting embedded Bare module '{}': no image at '{}'", name, imagePath);
         return {};
     }

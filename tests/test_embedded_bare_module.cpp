@@ -1,20 +1,8 @@
-// Registering a Bare module that is EMBEDDED in the host's own bundle.
-//
-// Every other way into the registry starts from a package on disk: a directory
-// holding manifest.json beside the image, produced by lgpm. On a phone that
-// layout is not available where it matters, and the reason is the same on both
-// platforms and is not a packaging preference:
-//
-//   iOS      the only place an app may carry a dylib is <App>.app/Frameworks/,
-//            and the image must be signed with the app's identity. A copy made
-//            at runtime into the sandbox is unsigned, and dyld refuses it.
-//   Android  since API 29 dlopen() of anything under the app's writable data
-//            directory is a W^X violation. The image has to stay in the app's
-//            native library directory, which is flat and read-only.
-//
-// Both are read-only directories with no room for a per-module package tree.
-// So the manifest travels with the APP rather than beside the image, and this
-// is the call that hands the two halves to the registry.
+// Registering a Bare module that is EMBEDDED in the host's own bundle: the
+// image ships where its platform will dlopen from and the manifest travels
+// with the app, so the two halves arrive separately. See logos_core.h
+// (logos_core_add_bare_module) for why neither phone platform allows the
+// package-directory layout every other entry point starts from.
 //
 // TEST_BARE_MODULE is the suite's own Bare fixture; any real file would do —
 // registration does not load the image, it only refuses to name one that is

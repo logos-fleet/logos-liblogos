@@ -98,16 +98,9 @@ public:
     std::string processModule(const std::string& modulePath);
 
     // Register a Bare module image that ships INSIDE the host's own bundle,
-    // with its manifest handed over separately.
-    //
-    // Every other way into this registry starts from a package directory:
-    // manifest.json beside the image, written by lgpm. On a phone that layout
-    // is unavailable exactly where the image has to live, and for a reason
-    // neither platform will negotiate — iOS will only dlopen an image that is
-    // in <App>.app/Frameworks/ and signed with the app's identity, and Android
-    // (API 29+) refuses to dlopen anything under the app's writable data
-    // directory at all. Both of those directories are read-only and flat, so
-    // the manifest cannot travel beside the image; it travels with the app.
+    // with its manifest handed over separately. Backs
+    // logos_core_add_bare_module -- see logos_core.h for why a phone leaves no
+    // room for a manifest beside the image.
     //
     // `metadataJson` is what the package's manifest.json would have said —
     // name, version, type, dependencies. The NAME IN IT IS THE IDENTITY, the
