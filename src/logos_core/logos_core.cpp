@@ -107,6 +107,12 @@ char* logos_core_process_module(const char* module_path) {
     return ModuleManager::processModuleCStr(module_path);
 }
 
+char* logos_core_add_bare_module(const char* metadata_json, const char* image_path) {
+    if (!metadata_json) { logos::logger("core").critical("logos_core_add_bare_module: metadata_json must not be null"); std::abort(); }
+    if (!image_path) { logos::logger("core").critical("logos_core_add_bare_module: image_path must not be null"); std::abort(); }
+    return ModuleManager::addEmbeddedBareModuleCStr(metadata_json, image_path);
+}
+
 char* logos_core_get_token(const char* key) {
     if (!key) { logos::logger("core").critical("logos_core_get_token: key must not be null"); std::abort(); }
 

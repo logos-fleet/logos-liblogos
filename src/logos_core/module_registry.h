@@ -63,6 +63,13 @@ struct ModuleInfo {
     // in-process by InProcContainer. Set at discovery, read by
     // ModuleManager::loadModuleInternal when it stamps ModuleDescriptor::format.
     std::string format;
+    // Registered by addEmbeddedBareModule rather than found by a scan: the
+    // image ships inside the HOST's own bundle (an iOS framework in
+    // <App>.app/Frameworks/, an Android .so in the app's native library
+    // directory) and is in no modules directory at all. Read by
+    // discoverInstalledModules, which prunes every unloaded module a scan did
+    // not see and would otherwise erase this one on the first refresh.
+    bool embedded = false;
     bool loaded = false;
     // Unix timestamp (seconds) of the most recent load, set by markLoaded and
     // cleared to 0 by markUnloaded. 0 ⟺ not currently loaded. Callers derive a
@@ -89,6 +96,36 @@ public:
 
     void discoverInstalledModules();
     std::string processModule(const std::string& modulePath);
+
+    // Register a Bare module image that ships INSIDE the host's own bundle,
+    // with its manifest handed over separately.
+    //
+    // Every other way into this registry starts from a package directory:
+    // manifest.json beside the image, written by lgpm. On a phone that layout
+    // is unavailable exactly where the image has to live, and for a reason
+    // neither platform will negotiate — iOS will only dlopen an image that is
+    // in <App>.app/Frameworks/ and signed with the app's identity, and Android
+    // (API 29+) refuses to dlopen anything under the app's writable data
+    // directory at all. Both of those directories are read-only and flat, so
+    // the manifest cannot travel beside the image; it travels with the app.
+    //
+    // `metadataJson` is what the package's manifest.json would have said —
+    // name, version, type, dependencies. The NAME IN IT IS THE IDENTITY, the
+    // same rule processBareModuleInternal follows: a Bare module asserts no
+    // name of its own anywhere, so there is nothing to cross-check it against
+    // and nothing that can disagree.
+    //
+    // The image is NOT opened here. Registration is a statement about the
+    // graph; whether the file is a Bare module at all is settled by
+    // InProcContainer at load, which resolves the module-impl C ABI and
+    // refuses anything that does not export it. What IS checked is that the
+    // path names an existing file, so a typo cannot register a module that can
+    // never load.
+    //
+    // Returns the registered name, or "" when the manifest is malformed, names
+    // no valid module identifier, or the image is not there.
+    std::string addEmbeddedBareModule(const std::string& metadataJson,
+                                      const std::string& imagePath);
 
     bool isKnown(const std::string& name) const;
     std::string modulePath(const std::string& name) const;

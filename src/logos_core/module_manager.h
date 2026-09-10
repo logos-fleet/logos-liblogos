@@ -70,6 +70,9 @@ namespace ModuleManager {
 
     std::string processModule(const std::string& modulePath);
     char* processModuleCStr(const char* modulePath);
+    // Backs logos_core_add_bare_module -- see logos_core.h and
+    // ModuleRegistry::addEmbeddedBareModule.
+    char* addEmbeddedBareModuleCStr(const char* metadataJson, const char* imagePath);
     bool loadModule(const char* moduleName);
     // `optionalLoad` decides whether optional dependencies that are INSTALLED
     // are brought up alongside the target. Their failure never reaches the
