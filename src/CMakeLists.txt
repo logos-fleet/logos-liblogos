@@ -226,6 +226,8 @@ set(LOGOS_CORE_SOURCES
     logos_core/web_module_loader.h
     logos_core/web_module_view.cpp
     logos_core/web_module_view.h
+    logos_core/web_qt_dispatch.cpp
+    logos_core/web_qt_dispatch.h
 )
 
 # The format-loader implementation and the logos_host_qt host binary live in the

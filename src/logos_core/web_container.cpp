@@ -1,6 +1,7 @@
 #include "web_container.h"
 #include "web_call_router.h"
 #include "web_module_glue.h"
+#include "web_qt_dispatch.h"
 
 #include <logos_api.h>
 #include <logos_api_provider.h>
@@ -12,7 +13,6 @@
 
 #include <QCoreApplication>
 #include <QEventLoop>
-#include <QMetaObject>
 #include <QString>
 #include <QThread>
 #include <spdlog/spdlog.h>
@@ -98,12 +98,20 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
         return false;
     }
 
+    // The two injected pointers are read HERE, under the lock their setters
+    // take, and used for the rest of this function: a host installs them once
+    // at startup, but reading them unlocked while setHostApi may still be
+    // running would be a race with no upside.
+    LogosAPI* hostApi = nullptr;
+    WebHostRoutes* hostRoutes = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_modules.count(desc.name)) {
             spdlog::warn("Web module already running: {}", desc.name);
             return false;
         }
+        hostApi = m_hostApi;
+        hostRoutes = m_hostRoutes;
     }
 
     WebModuleViewRequest request;
@@ -144,7 +152,7 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
     // is routed through this API, and a connection cannot be handed a router
     // that does not exist yet.
     const QString qname = QString::fromStdString(desc.name);
-    if (m_hostApi) {
+    if (hostApi) {
         // The transport set is a CONSTRUCTOR argument because the provider
         // binds its listeners in its own constructor; a set applied afterwards
         // binds nothing. Empty means the process-global default.
@@ -171,7 +179,7 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
     // and the container grants nothing of its own. A host that injected routes
     // keeps them; with neither, the router still answers — it tells the page
     // there is no host rather than leaving it to time out.
-    WebHostRoutes* routes = m_hostRoutes;
+    WebHostRoutes* routes = hostRoutes;
     if (!routes && instance->api) {
         instance->routes = std::make_unique<LogosApiRoutes>(instance->api, desc.name);
         routes = instance->routes.get();
@@ -375,7 +383,6 @@ void WebContainer::tearDown(Instance& instance)
     // the only unpublish path there is, so the API object's lifetime IS the
     // module's publication — and it goes FIRST, while the glue it published is
     // still alive.
-    //
     if (instance.router) instance.router->stop();  // and waits out what is running
     delete instance.api;
     instance.api = nullptr;
@@ -409,25 +416,12 @@ void WebContainer::terminateAll()
 // foreign thread is a segfault in the host, which is the exact opposite of what
 // a container that exists FOR crash containment may do.
 //
-// POSTED, not blocking. A blocking hand-off would deadlock the pair: the main
-// thread's teardown closes the view, which joins the pump thread, which would
-// be sitting here waiting for the main thread. Posting lets the pump thread
-// finish and be joined.
-//
-// Run inline when there is no QCoreApplication or when this IS its thread --
-// the second case is every gtest here, which drives the whole container from
-// the test thread and pumps no event loop.
+// runOnQtMainThread posts rather than blocks, which is what keeps the pump
+// thread joinable while the main thread is tearing this view down -- see the
+// declaration for the whole of that argument.
 void WebContainer::announceTermination(const std::string& name)
 {
-    QCoreApplication* app = QCoreApplication::instance();
-    if (app && QThread::currentThread() != app->thread()) {
-        // `app` as the context object, so a shutdown that outruns this event
-        // drops it rather than running teardown against a half-gone process.
-        QMetaObject::invokeMethod(app, [this, name] { retire(name, Retirement::PageLost); },
-                                  Qt::QueuedConnection);
-        return;
-    }
-    retire(name, Retirement::PageLost);
+    runOnQtMainThread([this, name] { retire(name, Retirement::PageLost); });
 }
 
 bool WebContainer::hasModule(const std::string& name) const

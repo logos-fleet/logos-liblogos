@@ -1,4 +1,5 @@
 #include "web_call_router.h"
+#include "web_qt_dispatch.h"
 
 #include <logos_api.h>
 #include <logos_api_client.h>
@@ -7,10 +8,6 @@
 #include <qvariant_rpc_value.h>
 
 #include <spdlog/spdlog.h>
-
-#include <QCoreApplication>
-#include <QMetaObject>
-#include <QThread>
 
 #include <utility>
 
@@ -116,11 +113,12 @@ bool LogosApiRoutes::subscribe(const std::string& target,
     // likely to be still coming up, and the acquiring form would either block
     // this thread on the transport's acquire timeout or lose the subscription
     // outright.
+    // The sink is handed over as-is: WebHostRoutes::EventSink already has
+    // onEventWhenAvailable's callback signature, so wrapping it would only add
+    // an indirection.
     const quint64 id = client->onEventWhenAvailable(
         QString::fromStdString(target), QString::fromStdString(eventName),
-        [sink = std::move(sink)](const QString& name, const QVariantList& data) {
-            sink(name, data);
-        });
+        std::move(sink));
     if (id == 0) return false;
 
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -187,22 +185,11 @@ void WebCallRouter::stop()
 void WebCallRouter::dispatch(const std::shared_ptr<Gate>& gate,
                              std::function<void()> work)
 {
-    auto guarded = [gate, work = std::move(work)] {
+    runOnQtMainThread([gate, work = std::move(work)] {
         std::lock_guard<std::mutex> lock(gate->mutex);
         if (!gate->alive) return;
         work();
-    };
-
-    QCoreApplication* app = QCoreApplication::instance();
-    if (app && QThread::currentThread() != app->thread()) {
-        // `app` as the context object, so a shutdown that outruns this event
-        // drops it rather than running it against a half-gone process.
-        QMetaObject::invokeMethod(app, std::move(guarded), Qt::QueuedConnection);
-        return;
-    }
-    // No event loop to queue on, or this already is it. Every gtest here is the
-    // first case and drives the whole router from the test thread.
-    guarded();
+    });
 }
 
 void WebCallRouter::onCall(const CallMessage& req, CallReply reply)

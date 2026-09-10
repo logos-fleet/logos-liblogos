@@ -132,8 +132,9 @@ private:
     void retire(const std::string& name, Retirement why);
 
     // Announce a module's death exactly once, whatever killed it. Hops to the
-    // Qt main thread first when it is not already on it -- see the definition,
-    // where the reason is a segfault rather than a style preference.
+    // Qt main thread first (runOnQtMainThread) when it is not already on it --
+    // see the definition, where the reason is a segfault rather than a style
+    // preference.
     void announceTermination(const std::string& name);
 
     // Lift a module out of m_modules, or nullptr when it is not there. The one

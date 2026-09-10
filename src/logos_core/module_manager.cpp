@@ -319,10 +319,13 @@ namespace {
                 != std::end(kPolicyExempt))
             return nullptr;
 
-        // One block per policy, each naming the artifact it demands and then
-        // the two it refuses. "auto" demands nothing and falls off the end.
+        // One block per policy, each opening with the artifact it DEMANDS and
+        // then refusing the other two in turn. "auto" demands nothing and falls
+        // off the end. A Qt plugin is the shape that has no marker of its own —
+        // it is what a module is when it is neither of the other two.
         const bool isBare = (format == "bare");
         const bool isWeb  = (format == "web");
+        const bool isQtPlugin = !isBare && !isWeb;
 
         if (policy == "inproc") {
             if (isBare) return nullptr;
@@ -335,14 +338,13 @@ namespace {
         }
 
         if (policy == "subprocess") {
+            if (isQtPlugin) return nullptr;
             if (isBare)
                 return "the container policy is 'subprocess' but this module is "
                        "a Bare module image, which only the Native container "
                        "can run";
-            if (isWeb)
-                return "the container policy is 'subprocess' but this module is "
-                       "a web variant, which only the Web container can run";
-            return nullptr;
+            return "the container policy is 'subprocess' but this module is a "
+                   "web variant, which only the Web container can run";
         }
 
         if (policy == "web") {
