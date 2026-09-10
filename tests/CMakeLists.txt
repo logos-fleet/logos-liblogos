@@ -26,6 +26,7 @@ add_executable(logos_core_tests
     test_load_concurrency.cpp
     test_inproc_container.cpp
     test_web_container.cpp
+    test_embedded_bare_module.cpp
 )
 
 # Imported container/loader targets the tests drive via SubprocessManager /
@@ -137,23 +138,30 @@ endforeach()
 # dlopen'd, never linked. The name carries the `_bare` suffix the production
 # discovery gate keys on, so the fixture is also the only thing asserting that
 # convention end to end.
-add_library(bare_fixture_module MODULE fixtures/bare_fixture_module.cpp)
-set_target_properties(bare_fixture_module PROPERTIES
-    PREFIX ""
-    OUTPUT_NAME "bare_fixture_bare"
-)
-if(APPLE)
-    set_target_properties(bare_fixture_module PROPERTIES SUFFIX ".dylib")
-endif()
-# The version macros only — <logos_protocol.h> declares the lp_* C ABI and
-# includes nothing, and the fixture CALLS none of it, so this adds a header path
-# and no link dependency. It is what lets the fixture report this build's own
-# protocol version and never fail the container's runtime major handshake for a
-# reason unrelated to the test.
-target_include_directories(bare_fixture_module PRIVATE
-    ${LOGOS_PROTOCOL_ROOT}/include
-    ${LOGOS_PROTOCOL_ROOT}/include/cpp
-)
-add_dependencies(logos_core_tests bare_fixture_module)
+#
+# BUILT TWICE — `bare_fixture_bare` and its twin `bare_twin_bare`, same sources,
+# two images. Two Bare modules in one process export the SAME module-impl C ABI
+# symbol names by construction; that is what the ABI is. So "each handle reaches
+# its own image" is a property of how the container opens them (RTLD_LOCAL) and
+# cannot be asserted with one library, and a second build of these sources is
+# the only way to produce the collision on purpose: identical symbols, distinct
+# images, distinct module-global state.
+foreach(_bare bare_fixture_bare bare_twin_bare)
+    add_library(${_bare} MODULE fixtures/bare_fixture_module.cpp)
+    set_target_properties(${_bare} PROPERTIES PREFIX "")
+    if(APPLE)
+        set_target_properties(${_bare} PROPERTIES SUFFIX ".dylib")
+    endif()
+    # The version macros only — <logos_protocol.h> declares the lp_* C ABI and
+    # includes nothing, and the fixture CALLS none of it, so this adds a header
+    # path and no link dependency. It is what lets the fixture report this
+    # build's own protocol version and never fail the container's runtime major
+    # handshake for a reason unrelated to the test.
+    target_include_directories(${_bare} PRIVATE
+        ${LOGOS_PROTOCOL_ROOT}/include
+        ${LOGOS_PROTOCOL_ROOT}/include/cpp
+    )
+    add_dependencies(logos_core_tests ${_bare})
+endforeach()
 
 gtest_discover_tests(logos_core_tests DISCOVERY_MODE PRE_TEST)

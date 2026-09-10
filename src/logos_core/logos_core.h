@@ -206,6 +206,42 @@ LOGOS_CORE_EXPORT char* logos_core_get_modules_info();
 // Returns the module name if successful, NULL if failed
 LOGOS_CORE_EXPORT char* logos_core_process_module(const char* module_path);
 
+// Register a Bare module image that ships INSIDE THE HOST'S OWN BUNDLE, with
+// its manifest handed over separately.
+//
+// Every other way a module becomes known starts from a package directory:
+// manifest.json beside the image, written by lgpm into a modules dir. On a
+// phone that layout is unavailable exactly where the image has to live, and
+// neither platform will negotiate:
+//
+//   iOS      an app may only carry a dylib in <App>.app/Frameworks/, and dyld
+//            loads it only if it is signed with the app's identity. An image
+//            copied into the sandbox at runtime is unsigned.
+//   Android  since API 29, dlopen() of anything under the app's writable data
+//            directory is a W^X violation. The image stays in the app's native
+//            library directory.
+//
+// Both directories are read-only and flat, so the manifest travels with the
+// APP (a bundled resource) instead of beside the image. This call hands the
+// two halves over.
+//
+// `metadata_json` is what the package's manifest.json would have said: name,
+// version, type, dependencies. The name in it IS the identity — a Bare module
+// asserts no name of its own, so there is nothing to cross-check against.
+// `image_path` is the Bare module image itself (on iOS the Mach-O inside the
+// framework bundle, not the bundle directory).
+//
+// The image is not opened here; InProcContainer settles at load whether it is
+// a Bare module at all, by resolving the module-impl C ABI. What is checked is
+// that the path names an existing file.
+//
+// Returns the registered module name, or NULL when the manifest is malformed,
+// names no valid module identifier, or the image is not there. The returned
+// string must be freed by the caller. Load it afterwards by name, exactly like
+// any discovered module.
+LOGOS_CORE_EXPORT char* logos_core_add_bare_module(const char* metadata_json,
+                                                   const char* image_path);
+
 // Get a token by key from the core token manager
 // Returns the token value if found, NULL if not found
 // The returned string must be freed by the caller

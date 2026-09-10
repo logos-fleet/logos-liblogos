@@ -155,6 +155,14 @@ int  logos_core_unload_module(const char* name, bool with_dependents);
 char* logos_core_process_module(const char* path);
 void logos_core_refresh_modules();
 
+// Register a Bare module image that ships inside the HOST's own bundle, with
+// its manifest handed over separately -- an iOS framework in
+// <App>.app/Frameworks/, or an Android .so in the app's native library dir.
+// Both are read-only, flat, and the only place their platform will dlopen
+// from, so there is no room for a manifest beside the image. Returns the
+// registered name; load it afterwards like any other module.
+char* logos_core_add_bare_module(const char* metadata_json, const char* image_path);
+
 // Dependency graph queries (forward + reverse edges; recursive walks BFS)
 char** logos_core_get_module_dependencies(const char* name, bool recursive);
 char** logos_core_get_module_dependents(const char* name, bool recursive);

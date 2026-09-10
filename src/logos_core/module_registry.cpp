@@ -205,7 +205,11 @@ void ModuleRegistry::discoverInstalledModules() {
     // evict the entry.
     std::vector<std::string> toRemove;
     for (const auto& [name, info] : m_modules) {
-        if (scannedNames.count(name) == 0 && !info.loaded)
+        // `embedded` is exempt: such a module is in NO modules directory by
+        // construction (its image ships inside the host's own bundle), so a
+        // scan can never see it and the prune below would erase it on the
+        // first refresh. `loaded` would mask that only while it is running.
+        if (scannedNames.count(name) == 0 && !info.loaded && !info.embedded)
             toRemove.push_back(name);
     }
     for (const std::string& name : toRemove) {
@@ -261,6 +265,77 @@ std::string ModuleRegistry::processModule(const std::string& modulePath) {
         logos::ModuleStateObserver::instance().record(
             name, logos::module_state::kAbsent, logos::module_state::kUnloaded);
     }
+    return name;
+}
+
+std::string ModuleRegistry::addEmbeddedBareModule(const std::string& metadataJson,
+                                                 const std::string& imagePath) {
+    nlohmann::json manifest;
+    try {
+        manifest = nlohmann::json::parse(metadataJson);
+    } catch (const std::exception& e) {
+        spdlog::warn("Rejecting embedded Bare module: manifest is not JSON ({})", e.what());
+        return {};
+    }
+    if (!manifest.is_object()) {
+        spdlog::warn("Rejecting embedded Bare module: manifest is not an object");
+        return {};
+    }
+
+    const std::string name = manifest.value("name", std::string());
+    // Same trust boundary as every other entry point: the name becomes the map
+    // key, the LogosAPI RPC target and a persistence directory segment.
+    if (!logos::isValidModuleName(name)) {
+        spdlog::warn("Rejecting embedded Bare module with invalid name '{}' from {}",
+                     name, imagePath);
+        return {};
+    }
+
+    // Not a load — see the header. This only refuses a path that names
+    // nothing, so a typo in an app's staging code fails HERE, where the app
+    // can report it, rather than at the first load attempt. The non-throwing
+    // overload returns false and sets `ec` for an empty or unreadable path
+    // alike, so one negation covers every way of not being there.
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(imagePath, ec)) {
+        spdlog::warn("Rejecting embedded Bare module '{}': no image at '{}'", name, imagePath);
+        return {};
+    }
+
+    logos::ScopedModuleStateFlush stateFlusher;
+
+    std::unique_lock lock(m_mutex);
+    const bool wasKnown = m_modules.count(name) > 0;
+
+    ModuleInfo& info = m_modules[name];
+    info.path = imagePath;
+    info.version = manifest.value("version", std::string());
+    info.format = "bare";
+    info.embedded = true;
+    info.metadataJson = manifest.dump();
+
+    info.dependencies.clear();
+    if (manifest.contains("dependencies") && manifest["dependencies"].is_array()) {
+        for (const auto& d : manifest["dependencies"]) {
+            if (d.is_string())
+                info.dependencies.push_back({d.get<std::string>(), {}, {}, false});
+            else if (d.is_object() && d.contains("name") && d["name"].is_string())
+                info.dependencies.push_back({d["name"].get<std::string>(),
+                                             d.value("version", std::string()),
+                                             d.value("signer", std::string()),
+                                             false});
+        }
+    }
+    info.optionalDependencies.clear();
+
+    recomputeDependentsLocked();
+    lock.unlock();
+
+    if (!wasKnown) {
+        logos::ModuleStateObserver::instance().record(
+            name, logos::module_state::kAbsent, logos::module_state::kUnloaded);
+    }
+    spdlog::debug("Registered embedded Bare module {} from {}", name, imagePath);
     return name;
 }
 
