@@ -2,6 +2,7 @@
 #include "module_state_observer.h"
 #include <spdlog/spdlog.h>
 #include <cassert>
+#include <cctype>
 #include <ctime>
 #include <deque>
 #include <mutex>
@@ -185,9 +186,9 @@ void ModuleRegistry::discoverInstalledModules() {
         // package cannot register under a privileged name it doesn't own.
         std::string moduleName;
         if (looksLikeBareModule(mod.mainFilePath))
-            moduleName = processBareModuleInternal(mod);
+            moduleName = processManifestModuleInternal(mod, "bare", "Bare module");
         else if (looksLikeWebModule(mod.mainFilePath))
-            moduleName = processWebModuleInternal(mod);
+            moduleName = processManifestModuleInternal(mod, "web", "web module");
         else
             moduleName = processModuleInternal(mod.mainFilePath, mod.name);
         if (moduleName.empty()) {
@@ -318,24 +319,32 @@ std::string ModuleRegistry::processModuleInternal(const std::string& modulePath,
     return name;
 }
 
-std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pkg) {
-    // No embedded-name cross-check to make, and none to miss: a Bare module
-    // asserts no name of its own anywhere, so the manifest name is not merely
-    // the trusted one, it is the only one. The F-022 guard in
-    // processModuleInternal exists because a Qt plugin DOES assert a name; the
-    // property it protects (a module registers only under the name its package
-    // owns) holds here by construction.
+// The MANIFEST arm of the upsert, shared by every artifact that carries no
+// binary metadata of its own: a Bare module image and a web page alike.
+//
+// No embedded-name cross-check to make, and none to miss: neither shape asserts
+// a name of its own anywhere this host reads, so the manifest name is not merely
+// the trusted one, it is the only one. The F-022 guard in processModuleInternal
+// exists because a Qt plugin DOES assert a name; the property it protects (a
+// module registers only under the name its package owns) holds here by
+// construction.
+//
+// `format` is what ModuleInfo::format is stamped with; `label` is how that
+// format is named in this function's log lines.
+std::string ModuleRegistry::processManifestModuleInternal(const InstalledPackage& pkg,
+                                                          const std::string& format,
+                                                          const char* label) {
     const std::string& name = pkg.name;
     if (!logos::isValidModuleName(name)) {
-        spdlog::warn("Rejecting Bare module with invalid name '{}' from {}",
-                     name, pkg.mainFilePath);
+        spdlog::warn("Rejecting {} with invalid name '{}' from {}",
+                     label, name, pkg.mainFilePath);
         return {};
     }
 
     ModuleInfo& info = m_modules[name];
     info.path = pkg.mainFilePath;
     info.version = pkg.version;
-    info.format = "bare";
+    info.format = format;
     // Rebuilt from the manifest each scan, the same way the Qt arm rebuilds
     // from embedded metadata: the manifest IS this module's metadata.
     info.metadataJson = nlohmann::json{
@@ -345,7 +354,7 @@ std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pk
         {"author", pkg.author},
         {"type", pkg.type},
         {"category", pkg.category},
-        {"format", "bare"},
+        {"format", format},
         {"dependencies", pkg.dependencies},
     }.dump();
     // Both edge sets carry whatever the manifest declared. The package
@@ -380,63 +389,7 @@ std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pk
     for (const auto& o : pkg.optionalDependencies)
         info.optionalDependencies.push_back(toGate(o));
 
-    spdlog::debug("Registered Bare module {} from {}", name, pkg.mainFilePath);
-    return name;
-}
-
-std::string ModuleRegistry::processWebModuleInternal(const InstalledPackage& pkg) {
-    // Same reasoning as the Bare arm: a page asserts no name of its own that
-    // this host reads, so the manifest name is not merely the trusted one, it
-    // is the only one. The F-022 embedded-name cross-check in
-    // processModuleInternal exists because a Qt plugin DOES assert a name.
-    const std::string& name = pkg.name;
-    if (!logos::isValidModuleName(name)) {
-        spdlog::warn("Rejecting web module with invalid name '{}' from {}",
-                     name, pkg.mainFilePath);
-        return {};
-    }
-
-    ModuleInfo& info = m_modules[name];
-    info.path = pkg.mainFilePath;
-    info.version = pkg.version;
-    info.format = "web";
-    // Rebuilt from the manifest each scan, exactly as the Bare arm does: for a
-    // module with no binary metadata to read, the manifest IS its metadata.
-    info.metadataJson = nlohmann::json{
-        {"name", pkg.name},
-        {"version", pkg.version},
-        {"description", pkg.description},
-        {"author", pkg.author},
-        {"type", pkg.type},
-        {"category", pkg.category},
-        {"format", "web"},
-        {"dependencies", pkg.dependencies},
-    }.dump();
-
-    auto toGate = [](const PackageDependency& d) {
-        return LogosCore::ModuleDependency{
-            d.name,
-            d.version.value_or(std::string()),
-            d.signer.value_or(std::string()),
-            false};
-    };
-
-    std::unordered_map<std::string, LogosCore::ModuleDependency> constrained;
-    for (const auto& c : pkg.dependencyConstraints)
-        constrained[c.name] = toGate(c);
-
-    info.dependencies = toDependencyEntries(pkg.dependencies);
-    for (auto& dep : info.dependencies) {
-        auto constraint = constrained.find(dep.name);
-        if (constraint != constrained.end())
-            dep = constraint->second;
-    }
-
-    info.optionalDependencies.clear();
-    for (const auto& o : pkg.optionalDependencies)
-        info.optionalDependencies.push_back(toGate(o));
-
-    spdlog::debug("Registered web module {} from {}", name, pkg.mainFilePath);
+    spdlog::debug("Registered {} {} from {}", label, name, pkg.mainFilePath);
     return name;
 }
 

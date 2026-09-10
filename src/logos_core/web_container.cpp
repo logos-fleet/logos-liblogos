@@ -256,16 +256,26 @@ LoadOutcome WebContainer::awaitLoad(const std::string& name,
              "with nothing before the deadline" };
 }
 
+// Lift a module out of the map, or nullptr when it is not there.
+//
+// The single place a module stops being loaded, which is what makes both
+// teardown paths EXACTLY ONCE: a second death notification for the same page —
+// a renderer crash the backend reports twice, or a kill racing a deliberate
+// unload — finds nothing and says nothing.
+std::unique_ptr<WebContainer::Instance> WebContainer::takeInstance(const std::string& name)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_modules.find(name);
+    if (it == m_modules.end()) return nullptr;
+    std::unique_ptr<Instance> instance = std::move(it->second);
+    m_modules.erase(it);
+    return instance;
+}
+
 void WebContainer::terminate(const std::string& name)
 {
-    std::unique_ptr<Instance> instance;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_modules.find(name);
-        if (it == m_modules.end()) return;
-        instance = std::move(it->second);
-        m_modules.erase(it);
-    }
+    std::unique_ptr<Instance> instance = takeInstance(name);
+    if (!instance) return;
 
     auto onTerminated = instance->onTerminated;
     tearDown(*instance);
@@ -309,18 +319,8 @@ void WebContainer::terminateAll()
 
 void WebContainer::announceTermination(const std::string& name)
 {
-    std::unique_ptr<Instance> instance;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_modules.find(name);
-        // EXACTLY ONCE: the module leaves the map here, so a second death
-        // notification for the same page — a renderer crash the backend reports
-        // twice, or a kill racing a deliberate unload — finds nothing and says
-        // nothing.
-        if (it == m_modules.end()) return;
-        instance = std::move(it->second);
-        m_modules.erase(it);
-    }
+    std::unique_ptr<Instance> instance = takeInstance(name);
+    if (!instance) return;
 
     auto onTerminated = instance->onTerminated;
     tearDown(*instance);

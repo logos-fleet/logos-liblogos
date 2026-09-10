@@ -108,6 +108,10 @@ private:
     // Announce a module's death exactly once, whatever killed it.
     void announceTermination(const std::string& name);
 
+    // Lift a module out of m_modules, or nullptr when it is not there. Both
+    // teardown paths go through it, which is what makes them exactly-once.
+    std::unique_ptr<Instance> takeInstance(const std::string& name);
+
     // Unpublish, drop the relay, stop the peer, close the page. Called with
     // m_mutex released — see the definition.
     static void tearDown(Instance& instance);

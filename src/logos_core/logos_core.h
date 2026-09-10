@@ -282,9 +282,9 @@ LOGOS_CORE_EXPORT void logos_core_set_access_policy(const char* policy_json);
 //
 // The reason it is an assertion and not a switch: a module has ONE artifact in
 // a given directory, and no flag can turn a Qt plugin into a Bare module, or
-// either of them into a page. A flag that silently fell back would make `--container inproc` mean
-// "in-process if you happen to have built it that way", which is not something
-// an operator can rely on or a CI job can assert.
+// either of them into a page. A flag that silently fell back would make
+// `--container inproc` mean "in-process if you happen to have built it that
+// way", which is not something an operator can rely on or a CI job can assert.
 //
 // Must be called before the modules it governs are loaded. An unrecognised
 // value is refused and leaves the previous policy in place.

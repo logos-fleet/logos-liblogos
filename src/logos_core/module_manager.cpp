@@ -312,28 +312,42 @@ namespace {
                 != std::end(kPolicyExempt))
             return nullptr;
 
+        // One block per policy, each naming the artifact it demands and then
+        // the two it refuses. "auto" demands nothing and falls off the end.
         const bool isBare = (format == "bare");
         const bool isWeb  = (format == "web");
-        if (policy == "inproc" && !isBare)
-            return isWeb
-                ? "the container policy is 'inproc' but this module is a web "
-                  "variant, which only the Web container can run"
-                : "the container policy is 'inproc' but this module is a Qt "
-                  "plugin, which only a subprocess host can run — it ships no "
-                  "Bare module artifact";
-        if (policy == "subprocess" && isBare)
-            return "the container policy is 'subprocess' but this module is a "
-                   "Bare module image, which only the Native container can run";
-        if (policy == "subprocess" && isWeb)
-            return "the container policy is 'subprocess' but this module is a "
-                   "web variant, which only the Web container can run";
-        if (policy == "web" && !isWeb)
-            return isBare
-                ? "the container policy is 'web' but this module is a Bare "
-                  "module image, which only the Native container can run"
-                : "the container policy is 'web' but this module is a Qt "
-                  "plugin, which only a subprocess host can run — it ships no "
-                  "web variant";
+
+        if (policy == "inproc") {
+            if (isBare) return nullptr;
+            if (isWeb)
+                return "the container policy is 'inproc' but this module is a "
+                       "web variant, which only the Web container can run";
+            return "the container policy is 'inproc' but this module is a Qt "
+                   "plugin, which only a subprocess host can run — it ships no "
+                   "Bare module artifact";
+        }
+
+        if (policy == "subprocess") {
+            if (isBare)
+                return "the container policy is 'subprocess' but this module is "
+                       "a Bare module image, which only the Native container "
+                       "can run";
+            if (isWeb)
+                return "the container policy is 'subprocess' but this module is "
+                       "a web variant, which only the Web container can run";
+            return nullptr;
+        }
+
+        if (policy == "web") {
+            if (isWeb) return nullptr;
+            if (isBare)
+                return "the container policy is 'web' but this module is a Bare "
+                       "module image, which only the Native container can run";
+            return "the container policy is 'web' but this module is a Qt "
+                   "plugin, which only a subprocess host can run — it ships no "
+                   "web variant";
+        }
+
         return nullptr;
     }
 
