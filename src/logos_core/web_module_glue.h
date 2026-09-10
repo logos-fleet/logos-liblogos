@@ -86,6 +86,11 @@ public:
     static constexpr int kCallTimeoutMs = 30000;
 
 private:
+    // Call the page and wait for its answer, pumping this thread's event loop
+    // when it is the Qt main thread — see the definition, where the reason is a
+    // deadlock rather than a preference.
+    QVariant awaitPage(const QString& methodName, const QVariantList& args);
+
     // The credential this relay presents to the page: the module's own root
     // token, as the core minted it and deliverCredential handed it over. Held
     // rather than read from the process ring because it is a property of THIS

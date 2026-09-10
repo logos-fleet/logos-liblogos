@@ -11,6 +11,7 @@
 #include <web_transport_connection.h>
 
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QMetaObject>
 #include <QString>
 #include <QThread>
@@ -289,11 +290,22 @@ LoadOutcome WebContainer::awaitLoad(const std::string& name,
     // own SDK publishes its module whenever its script finishes. A page that is
     // already serving answers on the first attempt and this costs one round
     // trip.
+    QCoreApplication* app = QCoreApplication::instance();
+    const bool onQtMainThread = app && QThread::currentThread() == app->thread();
+
     do {
         if (!hasModule(name))
             return { LoadVerdict::Failed, "the page went away while it was loading" };
         if (glue->pageIsServing())
             return { LoadVerdict::Loaded, {} };
+        // PUMPED, not slept, when this is the Qt main thread. A page may call
+        // OUT while it is starting up — asking capability_module for what it
+        // needs before it publishes — and that call is routed on this thread
+        // (WebCallRouter::dispatch). Sleeping the whole budget away would make
+        // a page that waits for its own first call look like a page that never
+        // published a module.
+        if (onQtMainThread)
+            QCoreApplication::processEvents(QEventLoop::AllEvents);
         std::this_thread::sleep_for(std::chrono::milliseconds(kPageReadyPollMs));
     } while (std::chrono::steady_clock::now() < deadline);
 
