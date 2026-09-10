@@ -5,6 +5,8 @@
 #include "module_loader_registry.h"
 #include "composite_module_loader.h"
 #include "inproc_container.h"
+#include "web_container.h"
+#include "web_module_loader.h"
 #include "bare_module_loader.h"
 #include "module_state_observer.h"
 #include <logos_container/container_factory.h>
@@ -311,13 +313,27 @@ namespace {
             return nullptr;
 
         const bool isBare = (format == "bare");
+        const bool isWeb  = (format == "web");
         if (policy == "inproc" && !isBare)
-            return "the container policy is 'inproc' but this module is a Qt "
-                   "plugin, which only a subprocess host can run — it ships no "
-                   "Bare module artifact";
+            return isWeb
+                ? "the container policy is 'inproc' but this module is a web "
+                  "variant, which only the Web container can run"
+                : "the container policy is 'inproc' but this module is a Qt "
+                  "plugin, which only a subprocess host can run — it ships no "
+                  "Bare module artifact";
         if (policy == "subprocess" && isBare)
             return "the container policy is 'subprocess' but this module is a "
                    "Bare module image, which only the Native container can run";
+        if (policy == "subprocess" && isWeb)
+            return "the container policy is 'subprocess' but this module is a "
+                   "web variant, which only the Web container can run";
+        if (policy == "web" && !isWeb)
+            return isBare
+                ? "the container policy is 'web' but this module is a Bare "
+                  "module image, which only the Native container can run"
+                : "the container policy is 'web' but this module is a Qt "
+                  "plugin, which only a subprocess host can run — it ships no "
+                  "web variant";
         return nullptr;
     }
 
@@ -353,6 +369,14 @@ namespace {
         return c;
     }
 
+    // The Web container, kept by reference for the same reason: it too has to
+    // be handed the trusted LogosAPI it publishes each page under, and a
+    // ModuleLoader has no seam for that.
+    std::shared_ptr<LogosCore::WebContainer>& webContainer() {
+        static std::shared_ptr<LogosCore::WebContainer> c;
+        return c;
+    }
+
     LogosCore::ModuleLoaderRegistry& loaderRegistry() {
         static LogosCore::ModuleLoaderRegistry reg;
         static std::once_flag initFlag;
@@ -378,6 +402,20 @@ namespace {
             reg.registerLoader(std::make_shared<LogosCore::CompositeModuleLoader>(
                 inProcContainer(),
                 std::make_shared<LogosCore::BareModuleFormatLoader>()));
+
+            // The WEB CONTAINER, a THIRD loader on the same rule: it claims
+            // only `format == "web"`, which nothing stamps on a Qt plugin or a
+            // Bare image. Registered unconditionally even though most processes
+            // have no webview backend installed, because "is a web module
+            // loadable here" is a question the container answers with a
+            // diagnostic naming the missing bridge — and a loader that were
+            // absent instead would answer it with "no loader available for this
+            // module format", which points at the artifact rather than at the
+            // host.
+            webContainer() = std::make_shared<LogosCore::WebContainer>();
+            reg.registerLoader(std::make_shared<LogosCore::CompositeModuleLoader>(
+                webContainer(),
+                std::make_shared<LogosCore::WebModuleFormatLoader>()));
         });
         return reg;
     }
@@ -931,7 +969,13 @@ namespace {
             // asks it there, with the same equal-MAJOR rule, before the module
             // runs. Warning here would report a gate that is not missing, only
             // asked elsewhere.
-            if (desc.format != "bare")
+            //
+            // A WEB module lands here too, and for a stronger reason: a page is
+            // not a binary at all, so there is no image to stamp. Its
+            // compatibility is decided by the message set its SDK speaks, which
+            // the transport rejects on the wire. Warning here would fire for
+            // every web module ever loaded.
+            if (desc.format != "bare" && desc.format != "web")
                 spdlog::warn(
                     "Module {} carries no usable logos_protocol_version "
                     "(pre-protocol build) — loading permissively",
@@ -1188,9 +1232,13 @@ namespace ModuleManager {
             // before any load can run, because admitConsumer's
             // informModuleToken must travel core's channel and the container
             // has no other way to reach it.
-            loaderRegistry();   // builds the container on first touch
+            loaderRegistry();   // builds the containers on first touch
             if (auto& c = inProcContainer())
                 c->setHostApi(&api);
+            // Same hand-off for the Web container: a page is published under
+            // its own identity on this same trusted channel.
+            if (auto& w = webContainer())
+                w->setHostApi(&api);
         });
     }
 
@@ -1274,9 +1322,10 @@ namespace ModuleManager {
 
     bool setContainerPolicy(const std::string& policy) {
         const std::string wanted = policy.empty() ? std::string("auto") : policy;
-        if (wanted != "auto" && wanted != "inproc" && wanted != "subprocess") {
+        if (wanted != "auto" && wanted != "inproc" && wanted != "subprocess"
+            && wanted != "web") {
             spdlog::error("Ignoring unknown container policy '{}' "
-                          "(expected auto | inproc | subprocess)", policy);
+                          "(expected auto | inproc | subprocess | web)", policy);
             return false;
         }
         containerPolicyValue() = wanted;

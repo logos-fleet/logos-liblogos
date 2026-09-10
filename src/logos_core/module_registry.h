@@ -60,7 +60,8 @@ struct ModuleInfo {
     // can run it. Empty (the overwhelming default) means a Qt plugin, the only
     // shape that existed before the Native container; "bare" is a Bare module
     // image — no Qt plugin metadata, the module-impl C ABI instead, run
-    // in-process by InProcContainer. Set at discovery, read by
+    // in-process by InProcContainer; "web" is a page, run in a webview by
+    // WebContainer. Set at discovery, read by
     // ModuleManager::loadModuleInternal when it stamps ModuleDescriptor::format.
     std::string format;
     bool loaded = false;
@@ -94,7 +95,7 @@ public:
     std::string modulePath(const std::string& name) const;
     // A JSON array describing every known module: one object per module with
     // its name, path, loaded flag, load timestamp (loaded_at, unix seconds; 0
-    // when not loaded), artifact `format` ("" for a Qt plugin, "bare" for a
+    // when not loaded), artifact `format` ("" for a Qt plugin, "bare"/"web" for a
     // Bare module image), `pid` (the loaded module's process id, -1 for a
     // module the Native container runs in-process, null when not loaded),
     // direct dependencies, direct dependents, and full embedded metadata
@@ -193,6 +194,15 @@ private:
     // module (looksLikeBareModule). Returns the registered name, or "" when
     // that name is not a valid module identifier.
     std::string processBareModuleInternal(const InstalledPackage& pkg);
+
+    // The WEB arm of the same upsert, and it exists for the same reason: a page
+    // carries no Qt plugin metadata either, so its identity and dependency
+    // edges come from the package manifest.
+    //
+    // Called for a package the discovery gate already identified as a web
+    // module (its `main` resolved to an .html document). Returns the registered
+    // name, or "" when that name is not a valid module identifier.
+    std::string processWebModuleInternal(const InstalledPackage& pkg);
 
     // Re-derives every ModuleInfo::dependents list by inverting the
     // dependencies edges across m_modules. Called at the tail of
