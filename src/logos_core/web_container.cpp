@@ -1,4 +1,5 @@
 #include "web_container.h"
+#include "web_call_router.h"
 #include "web_module_glue.h"
 
 #include <logos_api.h>
@@ -31,6 +32,12 @@ namespace LogosCore {
 struct WebContainer::Instance {
     std::string name;
     std::unique_ptr<WebModuleView> view;
+    // The page's outbound half, built BEFORE the connection because the
+    // connection is what serves it. Only one of the two is ever set: `routes`
+    // is what the container builds over this module's own LogosAPI, and a host
+    // that injected its own keeps ownership of it.
+    std::unique_ptr<WebHostRoutes> routes;
+    std::unique_ptr<WebCallRouter> router;
     std::unique_ptr<logos::web::WebTransportConnection> connection;
     std::unique_ptr<WebModuleGlue> glue;
     LogosAPI* api = nullptr;
@@ -60,6 +67,12 @@ void WebContainer::setHostApi(LogosAPI* hostApi)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_hostApi = hostApi;
+}
+
+void WebContainer::setHostRoutes(WebHostRoutes* routes)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_hostRoutes = routes;
 }
 
 bool WebContainer::canHandle(const ModuleDescriptor& desc) const
@@ -105,25 +118,6 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
         return false;
     }
 
-    // ── the conversation ──────────────────────────────────────────────────
-    //
-    // Constructed over THIS view's channel rather than reached through
-    // logos::web::setMessageChannelFactory, and that is not a shortcut: the
-    // process-wide factory takes no argument, so with two web modules loaded it
-    // could not tell which page a connection is for — and "which page" IS a Web
-    // module's identity (ADR 0005).
-    auto connection = std::make_unique<logos::web::WebTransportConnection>(view->channel());
-    if (!connection->connectToHost()) {
-        spdlog::error("Failed to start the web transport for module {}", desc.name);
-        return false;
-    }
-
-    LogosObject* page = connection->requestObject(QString::fromStdString(desc.name), 0);
-    if (!page) {
-        spdlog::error("Failed to obtain a handle on web module {}", desc.name);
-        return false;
-    }
-
     std::string moduleVersion = desc.rawMetadata.is_object()
         ? desc.rawMetadata.value("version", std::string())
         : std::string();
@@ -134,20 +128,22 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
     instance->name = desc.name;
     instance->pid = view->pid().value_or(kNoPid);
     instance->view = std::move(view);
-    instance->connection = std::move(connection);
-    instance->glue = std::make_unique<WebModuleGlue>(desc.name, moduleVersion, page);
     instance->onTerminated = std::move(onTerminated);
 
-    // ── publish it ────────────────────────────────────────────────────────
+    // ── the module's own identity ─────────────────────────────────────────
     //
     // PER-IDENTITY, exactly as the Native container does and for the same
     // reason: a web module shares this process's image, so "its" token store
     // has to be asked for or every inbound call authorizes as the HOST. The
     // credential itself is minted and registered by the core's load path —
     // sendToken below adopts it — so this takes only the store-selection half.
+    //
+    // BUILT BEFORE THE CONNECTION, which is the one ordering constraint in this
+    // function: the connection serves the page's outbound traffic, that traffic
+    // is routed through this API, and a connection cannot be handed a router
+    // that does not exist yet.
+    const QString qname = QString::fromStdString(desc.name);
     if (m_hostApi) {
-        const QString qname = QString::fromStdString(desc.name);
-
         // The transport set is a CONSTRUCTOR argument because the provider
         // binds its listeners in its own constructor; a set applied afterwards
         // binds nothing. Empty means the process-global default.
@@ -163,14 +159,61 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
             tearDown(*instance);
             return false;
         }
+    } else {
+        spdlog::debug("Web module {} loaded without a host API; not published", desc.name);
+    }
+
+    // ── what the page may reach ───────────────────────────────────────────
+    //
+    // The module's own API, entered as the module: a page calling a native
+    // module is authorized by capability_module exactly as a native caller is,
+    // and the container grants nothing of its own. A host that injected routes
+    // keeps them; with neither, the router still answers — it tells the page
+    // there is no host rather than leaving it to time out.
+    WebHostRoutes* routes = m_hostRoutes;
+    if (!routes && instance->api) {
+        instance->routes = std::make_unique<LogosApiRoutes>(instance->api, desc.name);
+        routes = instance->routes.get();
+    }
+    instance->router = std::make_unique<WebCallRouter>(desc.name, routes);
+
+    // ── the conversation ──────────────────────────────────────────────────
+    //
+    // Constructed over THIS view's channel rather than reached through
+    // logos::web::setMessageChannelFactory, and that is not a shortcut: the
+    // process-wide factory takes no argument, so with two web modules loaded it
+    // could not tell which page a connection is for — and "which page" IS a Web
+    // module's identity (ADR 0005).
+    //
+    // ONE CONNECTION, BOTH DIRECTIONS. The router is handed to it rather than
+    // laid over the channel as a second connection, because a second one would
+    // install the channel's single receiver and take every message from the
+    // first.
+    auto connection = std::make_unique<logos::web::WebTransportConnection>(
+        instance->view->channel(), instance->router.get());
+    if (!connection->connectToHost()) {
+        spdlog::error("Failed to start the web transport for module {}", desc.name);
+        tearDown(*instance);
+        return false;
+    }
+    instance->connection = std::move(connection);
+
+    LogosObject* page = instance->connection->requestObject(qname, 0);
+    if (!page) {
+        spdlog::error("Failed to obtain a handle on web module {}", desc.name);
+        tearDown(*instance);
+        return false;
+    }
+    instance->glue = std::make_unique<WebModuleGlue>(desc.name, moduleVersion, page);
+
+    // ── publish it ────────────────────────────────────────────────────────
+    if (instance->api) {
         if (!instance->api->getProvider()->registerObject(qname, instance->glue.get())) {
             spdlog::error("Failed to publish web module {}", desc.name);
             tearDown(*instance);
             return false;
         }
         instance->glue->init(instance->api);
-    } else {
-        spdlog::debug("Web module {} loaded without a host API; not published", desc.name);
     }
 
     // Installed BEFORE the instance is published to m_modules so a page that
@@ -302,10 +345,17 @@ void WebContainer::terminate(const std::string& name)
     retire(name, Retirement::Unloaded);
 }
 
-// Unpublish, drop the relay, stop the peer, close the page — in that order,
-// because each step removes a way back into the next one's memory. Called with
-// m_mutex RELEASED: closing a channel waits for an in-flight delivery, and that
-// delivery may be inside the relay, which would re-enter this container.
+// Stop routing, unpublish, drop the relay, stop the peer, close the page — in
+// that order, because each step removes a way back into the next one's memory.
+// Called with m_mutex RELEASED: closing a channel waits for an in-flight
+// delivery, and that delivery may be inside the relay, which would re-enter
+// this container.
+//
+// THE ORDER HAS A CYCLE IN IT, and stop() is what cuts it. The peer holds the
+// router as its inbound handler and calls onConnectionClosed() as it stops, so
+// the router object has to OUTLIVE the connection; the router's work runs
+// against the LogosAPI, so it has to STOP before the API is deleted. Stopping
+// and destroying are therefore two steps, at the two ends of this function.
 void WebContainer::tearDown(Instance& instance)
 {
     // Deleting the LogosAPI destroys its provider, and ~LogosAPIProvider
@@ -313,10 +363,15 @@ void WebContainer::tearDown(Instance& instance)
     // the only unpublish path there is, so the API object's lifetime IS the
     // module's publication — and it goes FIRST, while the glue it published is
     // still alive.
+    //
+    if (instance.router) instance.router->stop();  // and waits out what is running
     delete instance.api;
     instance.api = nullptr;
     instance.glue.reset();        // drops the subscriptions, then the handle
-    instance.connection.reset();  // stops the peer
+    instance.connection.reset();  // stops the peer — reaches the router, so it
+                                  // is still here to be reached
+    instance.router.reset();
+    instance.routes.reset();
     instance.view.reset();        // closes the page
 }
 

@@ -16,6 +16,8 @@ class LogosAPI;
 
 namespace LogosCore {
 
+class WebCallRouter;
+class WebHostRoutes;
 class WebModuleGlue;
 
 // THE WEB CONTAINER.
@@ -102,6 +104,20 @@ public:
     // to ask the page whether it is serving.
     WebModuleGlue* glueFor(const std::string& name) const;
 
+    // WHAT A PAGE MAY REACH, for the module loaded next.
+    //
+    // The container builds routes over each module's own LogosAPI, which is the
+    // right answer for every real host and no answer at all for a test driving
+    // the container with no core. Set this and the container hands the routes
+    // to the router instead of building its own; the pointer is borrowed and
+    // must outlive every module loaded after it is set.
+    //
+    // Deliberately NOT a per-module argument: the descriptor is what the loader
+    // produced and the routes are what the host provides, and folding one into
+    // the other would make every caller of launch() name something only the
+    // container knows how to build.
+    void setHostRoutes(WebHostRoutes* routes);
+
 private:
     struct Instance;
 
@@ -132,6 +148,7 @@ private:
     mutable std::mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<Instance>> m_modules;
     LogosAPI* m_hostApi = nullptr;
+    WebHostRoutes* m_hostRoutes = nullptr;
 };
 
 } // namespace LogosCore

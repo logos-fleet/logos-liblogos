@@ -216,6 +216,8 @@ set(LOGOS_CORE_SOURCES
     # webview itself is NOT here: WebModuleView is a runtime seam a host fills
     # (`logoscore --container web` does), so liblogos names no browser and a
     # process that never opens a page pays for none.
+    logos_core/web_call_router.cpp
+    logos_core/web_call_router.h
     logos_core/web_container.cpp
     logos_core/web_container.h
     logos_core/web_module_glue.cpp

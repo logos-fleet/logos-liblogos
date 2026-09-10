@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include "web_call_router.h"
 #include "web_container.h"
 #include "web_module_glue.h"
 #include "web_module_loader.h"
@@ -32,6 +33,8 @@
 #include <rpc_message.h>
 #include <rpc_value.h>
 
+#include <QCoreApplication>
+#include <QEventLoop>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QVariant>
@@ -43,6 +46,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -75,13 +79,41 @@ int64_t asInteger(const RpcValue& v)
     return 0;
 }
 
+// A QCoreApplication, made once and never destroyed.
+//
+// The page -> core direction needs one: the router POSTS a page's outbound work
+// to the Qt main thread rather than running it on the channel's delivery thread
+// (WebCallRouter::dispatch), so a process with no application object routes
+// inline instead — which is the fallback, not the path a daemon takes. Cases
+// that want the real one say so rather than depending on whether some earlier
+// test in this binary happened to make an app first.
+QCoreApplication* ensureApp()
+{
+    static int argc = 0;
+    static char* argv[] = { nullptr };
+    if (!QCoreApplication::instance())
+        new QCoreApplication(argc, argv);
+    return QCoreApplication::instance();
+}
+
+// Wait for `pred`, PUMPING THIS THREAD'S EVENT LOOP while waiting.
+//
+// The pump is not test scaffolding, it is the production path: a page's
+// outbound traffic is posted to the Qt main thread rather than routed on the
+// channel's delivery thread (see WebCallRouter::dispatch, where the reason is a
+// deadlock rather than a preference). The daemon's main thread pumps for
+// exactly this; a test that never did would wait out every deadline and
+// conclude the router was broken.
 bool waitFor(const std::function<bool()>& pred, int budgetMs)
 {
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::milliseconds(budgetMs);
     while (std::chrono::steady_clock::now() < deadline) {
         if (pred()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (QCoreApplication::instance())
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        else
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     return pred();
 }
@@ -114,6 +146,59 @@ public:
         ev.eventName = eventName;
         ev.data = std::move(data);
         m_channel->send(logos::web::encodeWebMessage(AnyMessage{ev}));
+    }
+
+    // ── the page as a CALLER ────────────────────────────────────────────────
+    //
+    // A page is not only something the host calls: it calls capability_module
+    // for a token, calls other modules, and watches what they emit. All of that
+    // goes back down THIS channel, which is what makes the container's router
+    // the only thing that can serve it.
+
+    // Send a Call at the host and answer with the id it was given.
+    uint64_t callHost(const std::string& target, const std::string& method,
+                      std::vector<RpcValue> args = {})
+    {
+        CallMessage call;
+        call.id = m_nextId++;
+        call.object = target;
+        call.method = method;
+        call.args = std::move(args);
+        call.authToken = m_credential;
+        m_channel->send(logos::web::encodeWebMessage(AnyMessage{call}));
+        return call.id;
+    }
+
+    // The Result for `id`, if one has come back.
+    bool resultFor(uint64_t id, ResultMessage& out) const
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        auto it = m_results.find(id);
+        if (it == m_results.end()) return false;
+        out = it->second;
+        return true;
+    }
+
+    void subscribeToHost(const std::string& target, const std::string& eventName)
+    {
+        SubscribeMessage sub;
+        sub.object = target;
+        sub.eventName = eventName;
+        m_channel->send(logos::web::encodeWebMessage(AnyMessage{sub}));
+    }
+
+    void unsubscribeFromHost(const std::string& target, const std::string& eventName)
+    {
+        UnsubscribeMessage un;
+        un.object = target;
+        un.eventName = eventName;
+        m_channel->send(logos::web::encodeWebMessage(AnyMessage{un}));
+    }
+
+    std::vector<EventMessage> eventsFromHost() const
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        return m_eventsIn;
     }
 
     int calls() const { return m_calls.load(); }
@@ -196,6 +281,22 @@ private:
             std::lock_guard<std::mutex> g(m_mu);
             m_lastTokenModule = tok->moduleName;
             m_lastToken = tok->token;
+            // What the page presents on every call it makes afterwards, exactly
+            // as logos-js-sdk's provider saves the credential it is handed.
+            if (tok->moduleName == m_object) m_credential = tok->token;
+            return;
+        }
+
+        // ── the answers to what THIS page asked the host ────────────────────
+        if (auto* res = std::get_if<ResultMessage>(&msg)) {
+            std::lock_guard<std::mutex> g(m_mu);
+            m_results[res->id] = *res;
+            return;
+        }
+
+        if (auto* ev = std::get_if<EventMessage>(&msg)) {
+            std::lock_guard<std::mutex> g(m_mu);
+            m_eventsIn.push_back(*ev);
             return;
         }
     }
@@ -211,6 +312,10 @@ private:
     std::string m_lastTokenModule;
     std::string m_lastToken;
     std::string m_lastCallAuthToken;
+    std::string m_credential;
+    std::atomic<uint64_t> m_nextId{1};
+    std::map<uint64_t, ResultMessage> m_results;
+    std::vector<EventMessage> m_eventsIn;
 };
 
 // A view over one endpoint of the pair. Killing it is what killing a renderer
@@ -296,6 +401,100 @@ private:
     std::vector<FakeView*> m_views;   // owned by the container
     LogosCore::WebModuleViewRequest m_lastRequest;
     std::optional<int64_t> m_pid;
+};
+
+// THE HOST, AS A PAGE SEES IT.
+//
+// The container's own routes go through the module's LogosAPI, which means
+// capability_module and a running core; this stands in for exactly that seam so
+// the page -> core direction can be driven with neither. What it does NOT stand
+// in for is the wire: everything below still crosses a real web transport.
+class FakeRoutes : public LogosCore::WebHostRoutes {
+public:
+    CallOutcome call(const std::string& target, const std::string& method,
+                     const QVariantList& args) override
+    {
+        {
+            std::lock_guard<std::mutex> g(m_mu);
+            m_calls.push_back({target, method, args});
+        }
+        CallOutcome outcome;
+        if (target == "capability_module" && method == "requestModule") {
+            outcome.ok = true;
+            outcome.value = QStringLiteral("minted-token-for-") + args.value(0).toString();
+            return outcome;
+        }
+        if (method == "double") {
+            outcome.ok = true;
+            outcome.value = args.value(0).toInt() * 2;
+            return outcome;
+        }
+        outcome.error = "no such module: " + target;
+        outcome.errorCode = "MODULE_NOT_LOADED";
+        return outcome;
+    }
+
+    QJsonArray methods(const std::string& target) override
+    {
+        QJsonObject m;
+        m["name"] = QString::fromStdString(target == "capability_module"
+                                               ? "requestModule" : "double");
+        m["type"] = "method";
+        return QJsonArray{ m };
+    }
+
+    bool subscribe(const std::string& target, const std::string& eventName,
+                   EventSink sink) override
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        m_sinks[{target, eventName}] = std::move(sink);
+        return true;
+    }
+
+    void unsubscribe(const std::string& target, const std::string& eventName) override
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        m_sinks.erase({target, eventName});
+    }
+
+    // A native module emits. NOT named `emit`: that is a Qt keyword macro and
+    // a member called it does not parse.
+    bool fireEvent(const std::string& target, const std::string& eventName,
+                   const QVariantList& data)
+    {
+        EventSink sink;
+        {
+            std::lock_guard<std::mutex> g(m_mu);
+            auto it = m_sinks.find({target, eventName});
+            if (it == m_sinks.end()) return false;
+            sink = it->second;
+        }
+        sink(QString::fromStdString(eventName), data);
+        return true;
+    }
+
+    struct Call {
+        std::string target;
+        std::string method;
+        QVariantList args;
+    };
+
+    std::vector<Call> calls() const
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        return m_calls;
+    }
+
+    size_t subscriptionCount() const
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        return m_sinks.size();
+    }
+
+private:
+    mutable std::mutex m_mu;
+    std::vector<Call> m_calls;
+    std::map<std::pair<std::string, std::string>, EventSink> m_sinks;
 };
 
 LogosCore::ModuleDescriptor webDescriptor(const std::string& name = "js_counter")
@@ -786,4 +985,151 @@ TEST(WebDiscoveryTest, AnHtmlNamedLikeABareImageIsBare)
     ScopedModulesDir dir;
     plantPackage(dir.path(), "ambiguous_module", "ambiguous_module_bare.html");
     EXPECT_EQ(discoveredFormat(dir, "ambiguous_module"), "bare");
+}
+
+// ── the page → core direction ───────────────────────────────────────────────
+//
+// The other half of "a Web module is an ordinary participant". A page that can
+// only be CALLED is a library: it cannot ask capability_module for a token, it
+// cannot call the module it was granted, and it cannot watch anything a native
+// module emits. All three go back down the SAME channel the container already
+// holds for its own calls into the page, which is why they are the container's
+// business rather than the transport factory's.
+
+TEST(WebContainerTest, APagesCallReachesTheHostAndItsAnswerComesBack)
+{
+    ensureApp();
+    ViewBackend backend;
+    FakeRoutes routes;
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    // THE CAPABILITY FLOW, from inside the page: ask capability_module for
+    // access to a native module, then call it.
+    const uint64_t grant = backend.page().callHost(
+        "capability_module", "requestModule", { RpcValue(std::string("math_module")) });
+
+    ResultMessage res;
+    ASSERT_TRUE(waitFor([&] { return backend.page().resultFor(grant, res); }, 2000))
+        << "the page's call never came back";
+    ASSERT_TRUE(res.ok) << res.err;
+    EXPECT_EQ(res.value.asString(), "minted-token-for-math_module");
+
+    const uint64_t call = backend.page().callHost("math_module", "double",
+                                                  { RpcValue(int64_t{21}) });
+    ASSERT_TRUE(waitFor([&] { return backend.page().resultFor(call, res); }, 2000));
+    ASSERT_TRUE(res.ok) << res.err;
+    EXPECT_EQ(asInteger(res.value), 42);
+
+    const auto seen = routes.calls();
+    ASSERT_EQ(seen.size(), 2u);
+    EXPECT_EQ(seen[0].target, "capability_module");
+    EXPECT_EQ(seen[0].method, "requestModule");
+    EXPECT_EQ(seen[1].target, "math_module");
+    EXPECT_EQ(seen[1].args.value(0).toInt(), 21);
+
+    container.terminateAll();
+}
+
+TEST(WebContainerTest, APageCallingAModuleThatIsNotThereIsToldSo)
+{
+    ensureApp();
+    ViewBackend backend;
+    FakeRoutes routes;
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    const uint64_t id = backend.page().callHost("nope_module", "anything");
+    ResultMessage res;
+    ASSERT_TRUE(waitFor([&] { return backend.page().resultFor(id, res); }, 2000));
+    EXPECT_FALSE(res.ok);
+    // The page has to be able to tell "the module isn't there" from "the method
+    // failed": a call that never happened and a method that returned nothing
+    // are the same empty value otherwise.
+    EXPECT_EQ(res.errCode, "MODULE_NOT_LOADED");
+
+    container.terminateAll();
+}
+
+// A page loaded with no host at all — the container's own test posture, and a
+// real one for a shell that has not brought its core up. The page must be
+// ANSWERED, not left to time out: a browser awaiting a Promise that never
+// settles has no way to tell that from a slow host.
+TEST(WebContainerTest, APageWithNoHostIsAnsweredRatherThanLeftWaiting)
+{
+    ensureApp();
+    ViewBackend backend;
+    LogosCore::WebContainer container;   // no host API, no routes
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    const uint64_t id = backend.page().callHost("capability_module", "requestModule");
+    ResultMessage res;
+    ASSERT_TRUE(waitFor([&] { return backend.page().resultFor(id, res); }, 2000))
+        << "a page with no host behind it was left waiting";
+    EXPECT_FALSE(res.ok);
+    EXPECT_EQ(res.errCode, "MODULE_NOT_LOADED");
+
+    container.terminateAll();
+}
+
+TEST(WebContainerTest, ANativeModulesEventReachesThePageThatSubscribed)
+{
+    ensureApp();
+    ViewBackend backend;
+    FakeRoutes routes;
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    backend.page().subscribeToHost("clock_module", "ticked");
+    ASSERT_TRUE(waitFor([&] { return routes.subscriptionCount() == 1; }, 2000))
+        << "the page's Subscribe never reached the host";
+
+    ASSERT_TRUE(routes.fireEvent("clock_module", "ticked", { 7 }));
+    ASSERT_TRUE(waitFor([&] { return !backend.page().eventsFromHost().empty(); }, 2000))
+        << "a native module's event never reached the page";
+
+    const auto events = backend.page().eventsFromHost();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].object, "clock_module");
+    EXPECT_EQ(events[0].eventName, "ticked");
+    ASSERT_EQ(events[0].data.size(), 1u);
+    EXPECT_EQ(asInteger(events[0].data[0]), 7);
+
+    // Withdrawn from the core, not just from the page: a sink the host keeps
+    // writing into after the page stopped listening is the leak the transport's
+    // own onConnectionClosed exists to prevent.
+    backend.page().unsubscribeFromHost("clock_module", "ticked");
+    EXPECT_TRUE(waitFor([&] { return routes.subscriptionCount() == 0; }, 2000));
+
+    container.terminateAll();
+}
+
+// A page that dies never sends Unsubscribe. Everything it was watching has to
+// be withdrawn anyway, or every later emission writes into a channel that is
+// gone — and on a host with two pages that is the live one paying for the dead
+// one's subscriptions.
+TEST(WebContainerTest, APageThatDiesTakesItsSubscriptionsWithIt)
+{
+    ensureApp();
+    ViewBackend backend;
+    FakeRoutes routes;
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    backend.page().subscribeToHost("clock_module", "ticked");
+    ASSERT_TRUE(waitFor([&] { return routes.subscriptionCount() == 1; }, 2000));
+
+    backend.view().kill();
+    EXPECT_TRUE(waitFor([&] { return routes.subscriptionCount() == 0; }, 2000))
+        << "a dead page's subscriptions outlived it";
+    EXPECT_FALSE(container.hasModule("js_counter"));
 }
