@@ -1,0 +1,87 @@
+--- a/CMakeLists.txt	2026-09-09 16:39:34
++++ b/CMakeLists.txt	2026-09-09 16:39:34
+@@ -91,6 +91,8 @@
+ add_subdirectory(src)
+ 
+ # GoogleTest setup
++option(LOGOS_BUILD_TESTS "Build the test suite" ON)
++if(LOGOS_BUILD_TESTS)
+ find_package(GTest QUIET)
+ if(NOT GTest_FOUND)
+     message(STATUS "GoogleTest not found via find_package, using FetchContent")
+@@ -107,6 +109,7 @@
+ include(GoogleTest)
+ 
+ add_subdirectory(tests)
++endif() # LOGOS_BUILD_TESTS
+ 
+ # Install rules: the parent-side loader lib + its header, and the host binary.
+ install(TARGETS logos_module_loader_qt
+@@ -122,6 +125,9 @@
+ install(FILES cmake/LogosFormatLoaderImplConfig.cmake
+     DESTINATION lib/cmake/LogosFormatLoaderImpl
+ )
++# logos_host_qt compiles for iOS but is never a valid image there (no
++# subprocesses); keep it out of the install tree.
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+ install(TARGETS logos_host_qt
+     RUNTIME DESTINATION bin
+ )
+@@ -138,3 +144,4 @@
+     logos_host_qt${CMAKE_EXECUTABLE_SUFFIX}
+     \${CMAKE_INSTALL_PREFIX}/bin/logos_host${CMAKE_EXECUTABLE_SUFFIX})
+ ")
++endif() # not iOS
+--- a/src/CMakeLists.txt	2026-09-09 16:39:34
++++ b/src/CMakeLists.txt	2026-09-09 16:39:34
+@@ -78,6 +78,12 @@
+ )
+ 
+ add_executable(logos_host_qt ${LOGOS_HOST_SOURCES})
++if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    # Qt6::Core's link interface enters through _qt_main_wrapper, which only
++    # the qios platform plugin defines; this console tool links no platform
++    # plugin, so supply the wrapper. The binary is never installed on iOS.
++    target_sources(logos_host_qt PRIVATE host/ios_entry_stub.cpp)
++endif()
+ 
+ # The host reads its auth token from an OS handle (TokenSource, default stdin)
+ # named by --token-source and writes its load status to stdout, so it depends on
+--- a/src/host/logos_host.cpp	2026-09-09 16:39:34
++++ b/src/host/logos_host.cpp	2026-09-09 16:39:34
+@@ -26,7 +26,11 @@
+ #include <thread>
+ 
+ #include <unistd.h>
+-#ifndef _WIN32
++// bionic has <execinfo.h> / backtrace(3) only from API 33.
++#if defined(__ANDROID__) && __ANDROID_API__ < 33
++#define LOGOS_HOST_NO_BACKTRACE 1
++#endif
++#if !defined(_WIN32) && !defined(LOGOS_HOST_NO_BACKTRACE)
+ #include <execinfo.h>
+ #endif
+ #ifdef __linux__
+@@ -145,7 +149,11 @@
+     safeWrite("). Backtrace (raw addresses; decode with atos/addr2line):\n");
+ 
+     void* frames[64];
++#if defined(LOGOS_HOST_NO_BACKTRACE)
++    const int n = 0;
++#else
+     const int n = ::backtrace(frames, 64);
++#endif
+     for (int i = 0; i < n; ++i) {
+         safeWrite("  ");
+         safeWriteHex(frames[i]);
+--- /dev/null
++++ b/src/host/ios_entry_stub.cpp
+@@ -0,0 +1,8 @@
++// iOS only: Qt6::Core's link options set the entry point to _qt_main_wrapper,
++// which the qios platform plugin provides for GUI apps. This console host
++// links no platform plugin, so route the wrapper straight to main().
++int main(int argc, char* argv[]);
++extern "C" int qt_main_wrapper(int argc, char* argv[])
++{
++    return main(argc, argv);
++}

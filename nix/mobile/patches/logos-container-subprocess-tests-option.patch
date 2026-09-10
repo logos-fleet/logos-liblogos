@@ -1,0 +1,19 @@
+--- a/CMakeLists.txt	2026-09-09 16:39:34
++++ b/CMakeLists.txt	2026-09-09 16:39:34
+@@ -19,6 +19,8 @@
+ add_subdirectory(src)
+ 
+ # GoogleTest setup
++option(LOGOS_BUILD_TESTS "Build the test suite" ON)
++if(LOGOS_BUILD_TESTS)
+ find_package(GTest QUIET)
+ 
+ if(NOT GTest_FOUND)
+@@ -37,6 +39,7 @@
+ 
+ # Add tests subdirectory
+ add_subdirectory(tests)
++endif() # LOGOS_BUILD_TESTS
+ 
+ # Install rules
+ install(TARGETS logos_container_subprocess

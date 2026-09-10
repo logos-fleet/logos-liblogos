@@ -273,6 +273,29 @@ Build the portable variant with `nix build '.#portable'`.
 ## Supported Platforms
 - macOS (aarch64-darwin, x86_64-darwin)
 - Linux (aarch64-linux, x86_64-linux)
+- iOS and Android, as a cross-built `liblogos_core` only (see below)
+
+## Mobile (iOS, Android)
+
+`liblogos_core` and the eight repos it links are cross-built from source by
+`nix/mobile/ios.nix` (static archives; Qt for iOS is static) and
+`nix/mobile/android.nix` (shared objects), on logos-nix's mobile
+pseudo-systems. They are exposed three ways:
+
+```bash
+# Flake packages, keyed by target (Android's build platform is x86_64-linux here)
+nix build .#packages.aarch64-ios-simulator.default
+nix build .#packages.aarch64-ios.logos-protocol
+
+# The same, keyed by the platform that BUILDS them -- how a Mac asks for Android
+nix build .#legacyPackages.aarch64-darwin.mobile.aarch64-android.default
+```
+
+A consumer that links the whole set (an app) uses `lib.mkMobileChains
+{ androidBuildSystem ? "x86_64-linux" }`, which returns one chain per target
+with every stage, `all` (the complete list of prefixes to link) and `pkgs`
+(the package set the chain was built from). logos-basecamp's
+`mobile/liblogos-smoke` is the reference consumer.
 
 ## Building with a different container or module loader
 

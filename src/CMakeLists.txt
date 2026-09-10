@@ -49,7 +49,11 @@ if(EXISTS "${LOGOS_PROTOCOL_ROOT}/lib/cmake/logos-protocol"
     # logos_qt_host_shared itself PUBLIC-links logos_protocol_shared, so the
     # protocol half arrives transitively and correctly layered -- it is asserted
     # in logos-plugin-qt by checks.shared-runtime-layering.
-    target_link_libraries(logos_sdk INTERFACE logos-qt-host::logos_qt_host_shared)
+    if(LOGOS_CORE_STATIC)
+      target_link_libraries(logos_sdk INTERFACE logos-qt-host::logos_qt_host)
+    else()
+      target_link_libraries(logos_sdk INTERFACE logos-qt-host::logos_qt_host_shared)
+    endif()
   endif()
 else()
   message(FATAL_ERROR "logos-protocol / logos-qt-host not found. Set "
@@ -217,7 +221,13 @@ set(LOGOS_CORE_SOURCES
 # and re-exports the host binary from the same package via bin.nix.
 
 # Create the logos core library
-add_library(logos_core SHARED ${LOGOS_CORE_SOURCES})
+# Static-only hosts (iOS) link the core into the app image.
+option(LOGOS_CORE_STATIC "Build liblogos_core as a static archive and link static dependencies" OFF)
+set(LOGOS_CORE_LIB_TYPE SHARED)
+if(LOGOS_CORE_STATIC)
+    set(LOGOS_CORE_LIB_TYPE STATIC)
+endif()
+add_library(logos_core ${LOGOS_CORE_LIB_TYPE} ${LOGOS_CORE_SOURCES})
 
 # Set the LOGOS_CORE_LIBRARY definition for the library
 target_compile_definitions(logos_core PRIVATE LOGOS_CORE_LIBRARY)
@@ -295,7 +305,7 @@ if(DEFINED LOGOS_PACKAGE_MANAGER_ROOT AND EXISTS "${LOGOS_PACKAGE_MANAGER_ROOT}/
     message(FATAL_ERROR "package_manager_lib not found in ${LOGOS_PACKAGE_MANAGER_ROOT}/lib")
   endif()
 
-  add_library(package_manager_lib SHARED IMPORTED)
+  add_library(package_manager_lib ${LOGOS_CORE_LIB_TYPE} IMPORTED)
   set_target_properties(package_manager_lib PROPERTIES
     IMPORTED_LOCATION "${LOGOS_PACKAGE_MANAGER_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${LOGOS_PACKAGE_MANAGER_ROOT}/include"
@@ -323,7 +333,7 @@ if(DEFINED LOGOS_PACKAGE_MANAGER_ROOT AND EXISTS "${LOGOS_PACKAGE_MANAGER_ROOT}/
     message(FATAL_ERROR "lgx not found in ${LOGOS_PACKAGE_MANAGER_ROOT}/lib")
   endif()
 
-  add_library(lgx_lib SHARED IMPORTED)
+  add_library(lgx_lib ${LOGOS_CORE_LIB_TYPE} IMPORTED)
   set_target_properties(lgx_lib PROPERTIES
     IMPORTED_LOCATION "${LOGOS_LGX_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${LOGOS_PACKAGE_MANAGER_ROOT}/include"
