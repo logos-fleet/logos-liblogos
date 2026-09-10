@@ -6458,11 +6458,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1789028517,
-        "narHash": "sha256-wfKujHtjIrzIpCEbNVuv+RRftFxn/7zOwOp7k4rNH8U=",
+        "lastModified": 1789047454,
+        "narHash": "sha256-Ku+dC4Dhowt5S1lp3sdA5Wa+tEez5XvG3z+8M/yxbMA=",
         "owner": "logos-fleet",
         "repo": "logos-plugin-qt",
-        "rev": "595274c34247ad41896844cc17f65c643f5437c0",
+        "rev": "e06545463e9d21ba6fcdd57bee15065643b419a6",
         "type": "github"
       },
       "original": {

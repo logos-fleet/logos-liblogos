@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -163,7 +164,36 @@ bool InProcContainer::launch(const ModuleDescriptor& desc,
         // and adopts the credential the CORE minted, which is the case
         // logos::adoptConsumerCredential exists for: "minted and registered
         // ELSEWHERE". See sendToken below.
-        instance->api = LogosAPI::forIdentity(qname);
+
+        // THE TRANSPORT SET IS A CONSTRUCTOR ARGUMENT, not a later setter, and
+        // that is why it is resolved before the LogosAPI exists: the provider
+        // binds its listeners in ITS constructor, so a set applied afterwards
+        // binds nothing.
+        //
+        // It matters here and nowhere else in the container. A SUBPROCESS
+        // module is handed `--transports` on its command line and builds its
+        // own LogosAPI from it; an in-process module gets only what this line
+        // gives it. Left at the process-global default, a host the operator
+        // configured for (say) TCP alone would DIAL this module on a listener
+        // it never bound — ModuleManager::moduleClient() picks the first
+        // configured transport — and the call would hang at acquire rather than
+        // fail. Empty set means the global default, exactly as before.
+        //
+        // LATENT TODAY, and said so rather than implied: the only caller of
+        // logos_core_set_module_transports is the logoscore daemon, and it
+        // names exactly one module — capability_module. So no Bare module
+        // carries a set yet, and every one of them takes the empty branch. It
+        // stops being latent the moment the Bundled-set build (#9) makes
+        // capability_module Bare, which is also the moment the failure would
+        // be a hang in the core's own trust path.
+        LogosTransportSet transports;
+        if (!desc.transportSetJson.empty())
+            transports = logos::transportSetFromJsonString(desc.transportSetJson);
+        if (!transports.empty())
+            spdlog::debug("In-process module {} publishes on {} configured transport(s)",
+                          desc.name, transports.size());
+
+        instance->api = LogosAPI::forIdentity(qname, std::move(transports));
         if (!instance->api) {
             spdlog::error("Failed to isolate the token store for in-process module {}; "
                           "refusing the load — half an identity is worse than none",
@@ -171,17 +201,6 @@ bool InProcContainer::launch(const ModuleDescriptor& desc,
             instance->glue.reset();
             closeBareModule(instance->abi);
             return false;
-        }
-
-        // The module's own transport set, when the daemon configured one, so
-        // its provider binds every listener rather than only the global
-        // default. Applied to the admitted LogosAPI's provider, which is the
-        // one thing admitConsumer does not decide.
-        if (!desc.transportSetJson.empty()) {
-            LogosTransportSet set = logos::transportSetFromJsonString(desc.transportSetJson);
-            if (!set.empty())
-                spdlog::debug("In-process module {} publishes on {} configured transport(s)",
-                              desc.name, set.size());
         }
 
         if (!instance->api->getProvider()->registerObject(qname, instance->glue.get())) {
