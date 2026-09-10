@@ -9,7 +9,10 @@
 
 #include <web_transport_connection.h>
 
+#include <QCoreApplication>
+#include <QMetaObject>
 #include <QString>
+#include <QThread>
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
@@ -317,7 +320,39 @@ void WebContainer::terminateAll()
     for (const auto& name : names) terminate(name);
 }
 
+// A page's death, reported from WHEREVER THE BACKEND NOTICED IT.
+//
+// ON THE QT MAIN THREAD, ALWAYS, and that is not defensive tidiness. A backend
+// learns its page is gone on a thread of its own -- the desktop one reads the
+// end of a socket on a pump thread -- and everything below this point is
+// Qt-affine: tearDown deletes the LogosAPI (a QObject tree that unpublishes
+// from QtRO sources), and `onTerminated` runs the core's own load-path
+// bookkeeping, which calls modules_state over a transport. Doing either from a
+// foreign thread is a segfault in the host, which is the exact opposite of what
+// a container that exists FOR crash containment may do.
+//
+// POSTED, not blocking. A blocking hand-off would deadlock the pair: the main
+// thread's teardown closes the view, which joins the pump thread, which would
+// be sitting here waiting for the main thread. Posting lets the pump thread
+// finish and be joined.
+//
+// Run inline when there is no QCoreApplication or when this IS its thread --
+// the second case is every gtest here, which drives the whole container from
+// the test thread and pumps no event loop.
 void WebContainer::announceTermination(const std::string& name)
+{
+    QCoreApplication* app = QCoreApplication::instance();
+    if (app && QThread::currentThread() != app->thread()) {
+        // `app` as the context object, so a shutdown that outruns this event
+        // drops it rather than running teardown against a half-gone process.
+        QMetaObject::invokeMethod(app, [this, name] { announceTerminationHere(name); },
+                                  Qt::QueuedConnection);
+        return;
+    }
+    announceTerminationHere(name);
+}
+
+void WebContainer::announceTerminationHere(const std::string& name)
 {
     std::unique_ptr<Instance> instance = takeInstance(name);
     if (!instance) return;

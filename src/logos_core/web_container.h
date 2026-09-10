@@ -105,8 +105,12 @@ public:
 private:
     struct Instance;
 
-    // Announce a module's death exactly once, whatever killed it.
+    // Announce a module's death exactly once, whatever killed it. Hops to the
+    // Qt main thread first when it is not already on it -- see the definition,
+    // where the reason is a segfault rather than a style preference.
     void announceTermination(const std::string& name);
+    // The announcement itself, on the thread that may run it.
+    void announceTerminationHere(const std::string& name);
 
     // Lift a module out of m_modules, or nullptr when it is not there. Both
     // teardown paths go through it, which is what makes them exactly-once.

@@ -1,6 +1,8 @@
 #ifndef WEB_MODULE_VIEW_H
 #define WEB_MODULE_VIEW_H
 
+#include "logos_core.h"   // LOGOS_CORE_EXPORT
+
 #include <message_channel.h>
 
 #include <cstdint>
@@ -73,8 +75,11 @@ public:
 using WebModuleViewFactory =
     std::function<std::unique_ptr<WebModuleView>(const WebModuleViewRequest&)>;
 
-void setWebModuleViewFactory(WebModuleViewFactory factory);
-WebModuleViewFactory webModuleViewFactory();
+// EXPORTED, because the caller is not in this library: a host installs its
+// backend from its own binary (logoscore does it when `--container web` is
+// asserted), which is also why this header is one of the two liblogos installs.
+LOGOS_CORE_EXPORT void setWebModuleViewFactory(WebModuleViewFactory factory);
+LOGOS_CORE_EXPORT WebModuleViewFactory webModuleViewFactory();
 
 } // namespace LogosCore
 
