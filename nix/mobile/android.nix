@@ -231,4 +231,7 @@ in
     liblogos
     ;
   all = liblogosInputs ++ [ liblogos ];
+  # The package set the chain was built from, so a consumer can build its
+  # own stage against it without instantiating a second one.
+  inherit pkgs;
 }

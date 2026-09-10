@@ -35,8 +35,19 @@ let
 
   # An iOS sysroot puts find_package in root-only mode (the toolchain file
   # sets CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY), so every input has to be
-  # named as a ROOT -- being on CMAKE_PREFIX_PATH is not enough.
-  roots = inputs: "-DCMAKE_FIND_ROOT_PATH=${lib.concatStringsSep ";" (map toString inputs)}";
+  # named as a ROOT -- being on CMAKE_PREFIX_PATH is not enough. Every stage
+  # names exactly its buildInputs.
+  stage =
+    args:
+    pkgs.mkIosCmakeStage (
+      args
+      // {
+        cmakeFlags = [
+          "-DCMAKE_FIND_ROOT_PATH=${lib.concatStringsSep ";" (map toString args.buildInputs)}"
+        ]
+        ++ args.cmakeFlags;
+      }
+    );
 
   thirdParty = [
     pkgs.boost
@@ -45,27 +56,25 @@ let
     pkgs.nlohmann_json
   ];
 
-  protocol = pkgs.mkIosCmakeStage {
+  protocol = stage {
     pname = "logos-protocol-ios";
     version = "0.1.0";
     src = srcs.protocol;
     sourceDir = "cpp";
     buildInputs = thirdParty;
     cmakeFlags = [
-      (roots thirdParty)
       "-DOPENSSL_ROOT_DIR=${pkgs.openssl}"
       "-DLOGOS_PROTOCOL_BUILD_SHARED=OFF"
     ];
   };
 
-  qtHost = pkgs.mkIosCmakeStage {
+  qtHost = stage {
     pname = "logos-qt-host-ios";
     version = "0.1.0";
     src = srcs.pluginQt;
     sourceDir = "cpp";
     buildInputs = thirdParty ++ [ protocol ];
     cmakeFlags = [
-      (roots (thirdParty ++ [ protocol ]))
       "-DOPENSSL_ROOT_DIR=${pkgs.openssl}"
       "-DLOGOS_PROTOCOL_ROOT=${protocol}"
       "-DLOGOS_QT_HOST_BUILD_SHARED=OFF"
@@ -74,7 +83,7 @@ let
 
   # The lgx C ABI as liblgx.a; CoreFoundation stands in for ICU, which has no
   # iOS build on this pin.
-  lgx = pkgs.mkIosCmakeStage {
+  lgx = stage {
     pname = "logos-package-ios";
     version = "0.1.0";
     src = srcs.package;
@@ -84,11 +93,6 @@ let
       native.cppSemver
     ];
     cmakeFlags = [
-      (roots [
-        pkgs.libsodium
-        pkgs.nlohmann_json
-        native.cppSemver
-      ])
       "-DLGX_STATIC_CABI=ON"
       "-DLGX_UNICODE_COREFOUNDATION=ON"
       "-DLGX_BUILD_TESTS=OFF"
@@ -102,24 +106,22 @@ let
     '';
   };
 
-  logosModule = pkgs.mkIosCmakeStage {
+  logosModule = stage {
     pname = "logos-module-ios";
     version = "0.1.0";
     src = srcs.module;
     buildInputs = [ lgx ];
     cmakeFlags = [
-      (roots [ lgx ])
       "-DLOGOS_PACKAGE_ROOT=${lgx}"
     ];
   };
 
-  processStats = pkgs.mkIosCmakeStage {
+  processStats = stage {
     pname = "process-stats-ios";
     version = "0.1.0";
     src = srcs.processStats;
     buildInputs = [ pkgs.nlohmann_json ];
     cmakeFlags = [
-      (roots [ pkgs.nlohmann_json ])
       "-DPROCESS_STATS_BUILD_TESTS=OFF"
     ];
   };
@@ -127,7 +129,7 @@ let
   # Boost.Process compiles here and the factory is linked, but iOS has no
   # subprocesses, so the container is never SELECTED at runtime. Building it
   # anyway keeps one liblogos_core source tree for both platforms.
-  containerSubprocess = pkgs.mkIosCmakeStage {
+  containerSubprocess = stage {
     pname = "logos-container-subprocess-ios";
     version = "0.1.0";
     src = patched "logos-container-subprocess" srcs.containerSubprocess [
@@ -135,7 +137,6 @@ let
     ];
     buildInputs = thirdParty ++ [ native.logosContainer ];
     cmakeFlags = [
-      (roots (thirdParty ++ [ native.logosContainer ]))
       "-DLOGOS_CONTAINER_ROOT=${native.logosContainer}"
       "-DLOGOS_BUILD_TESTS=OFF"
     ];
@@ -151,7 +152,7 @@ let
     native.logosModuleLoader
     pkgs.cli11
   ];
-  moduleLoaderQt = pkgs.mkIosCmakeStage {
+  moduleLoaderQt = stage {
     pname = "logos-module-loader-qt-ios";
     version = "0.1.0";
     src = patched "logos-module-loader-qt" srcs.moduleLoaderQt [
@@ -159,7 +160,6 @@ let
     ];
     buildInputs = moduleLoaderQtInputs;
     cmakeFlags = [
-      (roots moduleLoaderQtInputs)
       "-DOPENSSL_ROOT_DIR=${pkgs.openssl}"
       "-DLOGOS_CPP_SDK_ROOT=${native.cppSdk}"
       "-DLOGOS_PROTOCOL_ROOT=${protocol}"
@@ -174,7 +174,7 @@ let
     ];
   };
 
-  packageManager = pkgs.mkIosCmakeStage {
+  packageManager = stage {
     pname = "logos-package-manager-ios";
     version = "1.0.0-dev";
     src = srcs.packageManager;
@@ -183,10 +183,6 @@ let
       pkgs.nlohmann_json
     ];
     cmakeFlags = [
-      (roots [
-        lgx
-        pkgs.nlohmann_json
-      ])
       "-DLGX_ROOT=${lgx}"
       "-DLGPM_STATIC_LIB=ON"
     ];
@@ -205,13 +201,12 @@ let
     packageManager
     lgx
   ];
-  liblogos = pkgs.mkIosCmakeStage {
+  liblogos = stage {
     pname = "logos-liblogos-ios";
     version = "0.1.0";
     src = srcs.liblogos;
     buildInputs = liblogosInputs;
     cmakeFlags = [
-      (roots liblogosInputs)
       "-DOPENSSL_ROOT_DIR=${pkgs.openssl}"
       "-DLOGOS_CPP_SDK_ROOT=${native.cppSdk}"
       "-DLOGOS_PROTOCOL_ROOT=${protocol}"
@@ -250,4 +245,7 @@ in
     liblogos
     pkgs.libsodium
   ];
+  # The package set the chain was built from, so a consumer can build its
+  # own stage against it without instantiating a second one.
+  inherit pkgs;
 }

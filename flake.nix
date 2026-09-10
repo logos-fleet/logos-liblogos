@@ -2,12 +2,15 @@
   description = "Logos liblogos core library";
 
   inputs = {
-    # LOCKED TO THE logos-fleet FORK, not to this URL: the mobile chain below
-    # needs lib.mkMobileTargets / lib.mkForAllMobileTargets and the iOS
-    # third-party overlay, which live on the fork and are not upstream yet.
-    # `nix flake update logos-nix` would silently move it back to logos-co and
-    # the mobile outputs would stop evaluating -- re-pin with
-    #   nix flake lock --override-input logos-nix github:logos-fleet/logos-nix/<rev>
+    # THE MOBILE CHAIN'S INPUTS ARE LOCKED TO THE logos-fleet FORKS, not to
+    # these URLs: it needs logos-nix's lib.mkMobileTargets /
+    # lib.mkForAllMobileTargets and iOS third-party overlay, and the
+    # cross-build CMake options in logos-protocol, logos-plugin-qt,
+    # logos-module, logos-package, logos-package-manager and process-stats --
+    # none of which are upstream yet. `nix flake update` would silently move
+    # them back to logos-co and the mobile outputs would stop evaluating;
+    # re-pin with
+    #   nix flake lock --override-input <input> github:logos-fleet/<repo>/<rev>
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
     logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk";
@@ -157,7 +160,7 @@
             chain);
 
       # The same chains projected onto the flake `packages` schema.
-      mkMobilePackages = args:
+      mobilePackagesOf = chains:
         nixpkgs.lib.mapAttrs (_: chain: {
           logos-liblogos-lib = chain.liblogos;
           logos-protocol = chain.protocol;
@@ -169,9 +172,15 @@
           logos-module-loader-qt = chain.moduleLoaderQt;
           logos-package-manager = chain.packageManager;
           default = chain.liblogos;
-        }) (mkMobileChains args);
+        }) chains;
+      mkMobilePackages = args: mobilePackagesOf (mkMobileChains args);
 
-      mobilePackages = mkMobilePackages { };
+      # One chain per Android build platform; `packages` and `legacyPackages`
+      # below are views of these, so nothing is instantiated twice.
+      mobileChainsFor = nixpkgs.lib.genAttrs logos-nix.lib.androidBuildSystems
+        (androidBuildSystem: mkMobileChains { inherit androidBuildSystem; });
+      # Flake `packages` carry the canonical (x86_64-linux) Android build platform.
+      mobilePackages = mobilePackagesOf mobileChainsFor.x86_64-linux;
     in
     {
       packages = forAllTargets ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, logosQtHost, capabilityModule, modulesStateModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
@@ -335,10 +344,10 @@
       # even though it can build the identical closure. This is where a Mac
       # asks for the Android core:
       #   nix build .#legacyPackages.aarch64-darwin.mobile.aarch64-android.default
-      legacyPackages = nixpkgs.lib.genAttrs logos-nix.lib.androidBuildSystems (buildSystem: {
-        mobile = mkMobilePackages { androidBuildSystem = buildSystem; };
-        mobileChains = mkMobileChains { androidBuildSystem = buildSystem; };
-      });
+      legacyPackages = nixpkgs.lib.mapAttrs (_: chains: {
+        mobile = mobilePackagesOf chains;
+        mobileChains = chains;
+      }) mobileChainsFor;
 
       devShells = forAllSystems ({ pkgs, ... }: {
         default = pkgs.mkShell {
