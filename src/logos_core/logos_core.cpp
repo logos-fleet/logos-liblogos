@@ -8,6 +8,8 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <nlohmann/json.hpp>
 
 // === C API Implementation (Thin Wrappers) ===
 
@@ -117,7 +119,50 @@ char* logos_core_get_token(const char* key) {
 }
 
 char* logos_core_get_module_stats() {
-    return ProcessStats::getModuleStats(ModuleManager::getModuleProcessIds());
+    const auto pids = ModuleManager::getModuleProcessIds();
+
+    // process-stats answers by READING A PROCESS, so it can only answer for
+    // modules that are one. Every module the Native container runs reports the
+    // documented in-process sentinel (-1) and is silently absent from its
+    // array, which would make a running module look like no module at all —
+    // "stats has an entry per running module" is the whole contract of this
+    // call, and the pid it reports is what tells them apart.
+    //
+    // So the in-process ones are appended here with cpu/memory NULL rather than
+    // 0. Null is the honest value: their CPU and memory are the HOST's, already
+    // counted once against the daemon's own pid, and reporting 0 would say
+    // "measured, idle" for something that was never measured. A consumer that
+    // wants the number for an in-process module looks at the host process.
+    char* raw = ProcessStats::getModuleStats(pids);
+    nlohmann::json stats = raw
+        ? nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false)
+        : nlohmann::json(nullptr);
+    delete[] raw;
+    if (!stats.is_array())
+        stats = nlohmann::json::array();
+
+    std::unordered_set<std::string> reported;
+    for (const auto& entry : stats) {
+        if (entry.is_object() && entry.contains("name") && entry["name"].is_string())
+            reported.insert(entry["name"].get<std::string>());
+    }
+
+    for (const auto& [name, pid] : pids) {
+        if (pid >= 0 || reported.count(name))
+            continue;
+        stats.push_back({
+            {"name", name},
+            {"pid", pid},
+            {"cpu_percent", nullptr},
+            {"cpu_time_seconds", nullptr},
+            {"memory_mb", nullptr},
+        });
+    }
+
+    const std::string dumped = stats.dump();
+    char* result = new char[dumped.size() + 1];
+    memcpy(result, dumped.c_str(), dumped.size() + 1);
+    return result;
 }
 
 void logos_core_set_persistence_base_path(const char* path) {
@@ -141,6 +186,12 @@ void logos_core_set_access_policy(const char* policy_json) {
     // setters above, this does not abort on NULL.
     ModuleManager::setAccessPolicy(
         policy_json ? std::string(policy_json) : std::string{});
+}
+
+void logos_core_set_container_policy(const char* policy) {
+    // NULL/"" resets to "auto" (see header) — like the access policy, this
+    // does not abort on NULL.
+    ModuleManager::setContainerPolicy(policy ? std::string(policy) : std::string{});
 }
 
 void logos_core_refresh_modules()

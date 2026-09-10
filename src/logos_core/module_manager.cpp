@@ -4,6 +4,8 @@
 #include "dependency_resolver.h"
 #include "module_loader_registry.h"
 #include "composite_module_loader.h"
+#include "inproc_container.h"
+#include "bare_module_loader.h"
 #include "module_state_observer.h"
 #include <logos_container/container_factory.h>
 #include <logos_module_loader/format_loader_factory.h>
@@ -279,6 +281,46 @@ namespace {
         expectedExits().clear();
     }
 
+    // The operator's container assertion. Guarded by loadMutex()'s successor
+    // (fleetMutex) on read, and written before any load runs.
+    std::string& containerPolicyValue() {
+        static std::string p = "auto";
+        return p;
+    }
+
+    // Does `policy` forbid running the module `name` out of a `format`
+    // artifact? Answers the reason it does, or nullptr when the load may
+    // proceed. See logos_core_set_container_policy for what each policy means.
+    //
+    // The runtime's OWN modules are exempt, and this is not a loophole.
+    // capability_module and modules_state are loaded by the core itself,
+    // unconditionally, before any operator module — a policy that refused them
+    // would turn `--container inproc` into "start a core with no
+    // capability_module", i.e. a core in which every cross-module call is
+    // refused, which is not what anyone asking for the Native container means.
+    // They ship as Qt plugins and become Bare when the Bundled-set build makes
+    // them so; until then the assertion governs the modules the OPERATOR chose
+    // to load, which is where it has something to assert.
+    const char* containerPolicyMismatch(const std::string& policy,
+                                        const std::string& name,
+                                        const std::string& format) {
+        static const std::string kPolicyExempt[] =
+            {"capability_module", "modules_state", "core", "core_service"};
+        if (std::find(std::begin(kPolicyExempt), std::end(kPolicyExempt), name)
+                != std::end(kPolicyExempt))
+            return nullptr;
+
+        const bool isBare = (format == "bare");
+        if (policy == "inproc" && !isBare)
+            return "the container policy is 'inproc' but this module is a Qt "
+                   "plugin, which only a subprocess host can run — it ships no "
+                   "Bare module artifact";
+        if (policy == "subprocess" && isBare)
+            return "the container policy is 'subprocess' but this module is a "
+                   "Bare module image, which only the Native container can run";
+        return nullptr;
+    }
+
     // Both guarded by configMutex(). parsedEnforcePolicy is set only in enforce mode.
     std::string& accessPolicyJson() {
         static std::string s;
@@ -303,6 +345,14 @@ namespace {
     // the contract factory seams (LogosCore::makeContainer / makeFormatLoader);
     // the core names no specific container or loader. Frontends can still
     // register additional loaders via ModuleManager::loaders().registerLoader().
+    // The Native container, kept by reference as well as in the registry
+    // because the host has to hand it the trusted LogosAPI it admits each
+    // in-process module through, and a ModuleLoader has no seam for that.
+    std::shared_ptr<LogosCore::InProcContainer>& inProcContainer() {
+        static std::shared_ptr<LogosCore::InProcContainer> c;
+        return c;
+    }
+
     LogosCore::ModuleLoaderRegistry& loaderRegistry() {
         static LogosCore::ModuleLoaderRegistry reg;
         static std::once_flag initFlag;
@@ -311,6 +361,23 @@ namespace {
             auto loader    = LogosCore::makeFormatLoader();
             if (container && loader)
                 reg.registerLoader(std::make_shared<LogosCore::CompositeModuleLoader>(container, loader));
+
+            // The NATIVE CONTAINER, registered as a SECOND loader rather than
+            // swapped in for the first. Both are always present and the
+            // descriptor decides: this pair claims only `format == "bare"`,
+            // which the Qt pair never claims and which nothing stamps on a Qt
+            // plugin. So a workspace with no Bare module behaves exactly as it
+            // did, and a host does not choose a container globally — the
+            // artifact does.
+            //
+            // Not reached through LogosCore::makeContainer(): that seam is
+            // link-time and admits exactly one provider, which is the right
+            // shape for "which container is the DEFAULT" and the wrong shape
+            // for "which containers exist".
+            inProcContainer() = std::make_shared<LogosCore::InProcContainer>();
+            reg.registerLoader(std::make_shared<LogosCore::CompositeModuleLoader>(
+                inProcContainer(),
+                std::make_shared<LogosCore::BareModuleFormatLoader>()));
         });
         return reg;
     }
@@ -765,7 +832,27 @@ namespace {
         LogosCore::ModuleDescriptor desc;
         desc.name        = name;
         desc.path        = modPath;
-        desc.format      = "qt-plugin";
+        // WHICH CONTAINER RUNS THIS MODULE is decided here, and by the
+        // artifact rather than by a flag: a Bare module image can only run
+        // in-process, and a Qt plugin can only run in a subprocess host. The
+        // registry recorded the shape at discovery.
+        const std::string moduleFormat = registryInstance().moduleFormat(name);
+        desc.format      = moduleFormat.empty() ? std::string("qt-plugin") : moduleFormat;
+
+        // ── the container assertion ────────────────────────────────────
+        // The operator said which container everything here must run in;
+        // the artifact says which one it CAN run in. Where they disagree the
+        // load is refused, because the alternative is running the module in
+        // the container the operator explicitly said not to and reporting
+        // success. See logos_core_set_container_policy.
+        if (const char* mismatch =
+                containerPolicyMismatch(containerPolicyValue(), name, desc.format)) {
+            spdlog::error("Refusing to load module {}: {}", name, mismatch);
+            logos::ModuleStateObserver::instance().record(
+                name, logos::module_state::kUnloaded, logos::module_state::kError,
+                std::nullopt, std::nullopt, mismatch);
+            return false;
+        }
         desc.dependencies = registryInstance().moduleDependencies(name);
         desc.modulesDirs  = registryInstance().modulesDirs();
 
@@ -837,10 +924,18 @@ namespace {
                 "incompatible logos-protocol major: module " + moduleProtocolVersion);
             return false;
         case LogosCore::ProtocolGateDecision::AllowLegacy:
-            spdlog::warn(
-                "Module {} carries no usable logos_protocol_version "
-                "(pre-protocol build) — loading permissively",
-                name);
+            // A Bare module is EXPECTED to land here: this stamp is read out of
+            // Qt plugin metadata, and a Bare module carries none — that is what
+            // "bare" means. It answers the same question over
+            // logos_module_get_protocol_version instead, and InProcContainer
+            // asks it there, with the same equal-MAJOR rule, before the module
+            // runs. Warning here would report a gate that is not missing, only
+            // asked elsewhere.
+            if (desc.format != "bare")
+                spdlog::warn(
+                    "Module {} carries no usable logos_protocol_version "
+                    "(pre-protocol build) — loading permissively",
+                    name);
             break;
         case LogosCore::ProtocolGateDecision::Allow:
             spdlog::debug("Module {} protocol version {} compatible with host {}",
@@ -1085,7 +1180,18 @@ namespace ModuleManager {
         // Single-threaded at startup, so constructing here cannot race the
         // static's guard; the marshal only matters for a host that starts off
         // the Qt main thread.
-        logos::runOnQtMainThread([]() { coreApi(); });
+        logos::runOnQtMainThread([]() {
+            LogosAPI& api = coreApi();
+            // The Native container admits each in-process module as a consumer
+            // over this same trusted channel, so it needs the object rather
+            // than a copy of the name. Done HERE, on the owner thread and
+            // before any load can run, because admitConsumer's
+            // informModuleToken must travel core's channel and the container
+            // has no other way to reach it.
+            loaderRegistry();   // builds the container on first touch
+            if (auto& c = inProcContainer())
+                c->setHostApi(&api);
+        });
     }
 
     LogosCore::ModuleLoaderRegistry& loaders() {
@@ -1164,6 +1270,22 @@ namespace ModuleManager {
                      "{} explicit restriction(s) override the derived allow-list",
                      parsed->restrictions.size());
         parsedEnforcePolicy() = std::move(parsed);
+    }
+
+    bool setContainerPolicy(const std::string& policy) {
+        const std::string wanted = policy.empty() ? std::string("auto") : policy;
+        if (wanted != "auto" && wanted != "inproc" && wanted != "subprocess") {
+            spdlog::error("Ignoring unknown container policy '{}' "
+                          "(expected auto | inproc | subprocess)", policy);
+            return false;
+        }
+        containerPolicyValue() = wanted;
+        spdlog::info("Container policy: {}", wanted);
+        return true;
+    }
+
+    std::string containerPolicy() {
+        return containerPolicyValue();
     }
 
     void discoverInstalledModules() {

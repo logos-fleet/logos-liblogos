@@ -198,6 +198,20 @@ set(LOGOS_CORE_SOURCES
     logos_core/composite_module_loader.h
     logos_core/module_loader_registry.cpp
     logos_core/module_loader_registry.h
+    # The NATIVE CONTAINER. Unlike the subprocess container and the Qt format
+    # loader, this pair is NOT reached through the link-time factory seams and
+    # so is built here: those seams admit exactly one provider each, which
+    # answers "which container is the default" and cannot answer "which
+    # containers exist". Both are registered, and the module's artifact shape
+    # decides which one runs it.
+    logos_core/bare_module_abi.cpp
+    logos_core/bare_module_abi.h
+    logos_core/bare_module_glue.cpp
+    logos_core/bare_module_glue.h
+    logos_core/bare_module_loader.cpp
+    logos_core/bare_module_loader.h
+    logos_core/inproc_container.cpp
+    logos_core/inproc_container.h
 )
 
 # The format-loader implementation and the logos_host_qt host binary live in the

@@ -211,9 +211,16 @@ LOGOS_CORE_EXPORT char* logos_core_process_module(const char* module_path);
 // The returned string must be freed by the caller
 LOGOS_CORE_EXPORT char* logos_core_get_token(const char* key);
 
-// Get module statistics (CPU and memory usage) for all loaded modules
-// Returns a JSON string containing array of module stats, NULL on error
-// The returned string must be freed by the caller
+// Get module statistics (CPU and memory usage) for all loaded modules.
+// Returns a JSON string containing an array of module stats, NULL on error.
+// The returned string must be freed by the caller.
+//
+// ONE ENTRY PER RUNNING MODULE, whichever container it runs in. A module in the
+// Native container has no process of its own — it reports pid -1, the
+// LoadedModuleHandle sentinel — so its `cpu_percent`, `cpu_time_seconds` and
+// `memory_mb` are NULL rather than 0: those resources belong to the host
+// process and are already counted against its pid. `pid` is what distinguishes
+// the two cases.
 LOGOS_CORE_EXPORT char* logos_core_get_module_stats();
 
 // Set the base directory for module instance persistence.
@@ -257,6 +264,29 @@ LOGOS_CORE_EXPORT void logos_core_set_module_transports(const char* module_name,
 //
 // Must be called before logos_core_start(). NULL or "" clears the policy.
 LOGOS_CORE_EXPORT void logos_core_set_access_policy(const char* policy_json);
+
+// Constrain which CONTAINER modules are allowed to run in.
+//
+// Which container actually runs a module is decided by its artifact: a Bare
+// module image runs in-process (the Native container), a Qt plugin runs in a
+// subprocess host. This does not change that. It asserts what the operator
+// EXPECTS, so a workspace that does not match says so at load instead of
+// quietly doing the other thing:
+//
+//   "auto"        (default, and what NULL/"" means) — run each module in
+//                 whichever container its artifact calls for.
+//   "inproc"      — every module must be a Bare module. A Qt plugin is refused.
+//   "subprocess"  — every module must be a Qt plugin. A Bare module is refused.
+//
+// The reason it is an assertion and not a switch: a module has ONE artifact in
+// a given directory, and no flag can turn a Qt plugin into a Bare module or the
+// reverse. A flag that silently fell back would make `--container inproc` mean
+// "in-process if you happen to have built it that way", which is not something
+// an operator can rely on or a CI job can assert.
+//
+// Must be called before the modules it governs are loaded. An unrecognised
+// value is refused and leaves the previous policy in place.
+LOGOS_CORE_EXPORT void logos_core_set_container_policy(const char* policy);
 
 // Re-scan all module directories and update known modules.
 // Call after installing new modules so they become discoverable.

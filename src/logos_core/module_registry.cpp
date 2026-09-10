@@ -8,6 +8,8 @@
 #include <shared_mutex>
 #include <algorithm>
 #include <unordered_set>
+#include <filesystem>
+#include <string_view>
 #include <module_lib/module_lib.h>
 #include <package_manager_lib.h>
 
@@ -67,6 +69,25 @@ std::vector<LogosCore::ModuleDependency> toDependencyEntries(
     deps.reserve(names.size());
     for (const auto& n : names) deps.push_back({n, {}, {}});
     return deps;
+}
+
+// Is `mainFilePath` a Bare module image?
+//
+// By the FILENAME, which is the only thing available without opening it. The
+// Bare output of logos-module-builder writes `<name>_bare.<so|dylib|dll>` and
+// nothing else does, so the stem suffix is the artifact's own declaration of
+// its shape. It is a cheap GATE, not the proof: InProcContainer resolves the
+// module-impl C ABI at load and refuses anything that does not export it, which
+// is what a file merely named like a Bare module runs into.
+//
+// Deliberately not a manifest key. A `"format": "bare"` field would be one more
+// thing an LGX package can get wrong about itself, and the shape is already
+// decided by which output the builder produced.
+bool looksLikeBareModule(const std::string& mainFilePath) {
+    constexpr std::string_view kSuffix = "_bare";
+    const std::string stem = std::filesystem::path(mainFilePath).stem().string();
+    return stem.size() > kSuffix.size() &&
+           std::string_view(stem).substr(stem.size() - kSuffix.size()) == kSuffix;
 }
 
 }  // namespace
@@ -143,7 +164,9 @@ void ModuleRegistry::discoverInstalledModules() {
         // self-asserted name embedded in the plugin binary. processModuleInternal
         // refuses the plugin if its embedded metadata name disagrees, so a
         // package cannot register under a privileged name it doesn't own.
-        std::string moduleName = processModuleInternal(mod.mainFilePath, mod.name);
+        std::string moduleName = looksLikeBareModule(mod.mainFilePath)
+            ? processBareModuleInternal(mod)
+            : processModuleInternal(mod.mainFilePath, mod.name);
         if (moduleName.empty()) {
             spdlog::warn("Failed to process module: {}", mod.mainFilePath);
             continue;
@@ -267,7 +290,74 @@ std::string ModuleRegistry::processModuleInternal(const std::string& modulePath,
     info.version = metadata->version.toStdString();
     info.dependencies = toGateDependencies(metadata->dependencies);
     info.optionalDependencies = toGateDependencies(metadata->optionalDependencies);
+    info.format.clear();   // a Qt plugin — the shape that needs no name
 
+    return name;
+}
+
+std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pkg) {
+    // No embedded-name cross-check to make, and none to miss: a Bare module
+    // asserts no name of its own anywhere, so the manifest name is not merely
+    // the trusted one, it is the only one. The F-022 guard in
+    // processModuleInternal exists because a Qt plugin DOES assert a name; the
+    // property it protects (a module registers only under the name its package
+    // owns) holds here by construction.
+    const std::string& name = pkg.name;
+    if (!logos::isValidModuleName(name)) {
+        spdlog::warn("Rejecting Bare module with invalid name '{}' from {}",
+                     name, pkg.mainFilePath);
+        return {};
+    }
+
+    ModuleInfo& info = m_modules[name];
+    info.path = pkg.mainFilePath;
+    info.version = pkg.version;
+    info.format = "bare";
+    // Rebuilt from the manifest each scan, the same way the Qt arm rebuilds
+    // from embedded metadata: the manifest IS this module's metadata.
+    info.metadataJson = nlohmann::json{
+        {"name", pkg.name},
+        {"version", pkg.version},
+        {"description", pkg.description},
+        {"author", pkg.author},
+        {"type", pkg.type},
+        {"category", pkg.category},
+        {"format", "bare"},
+        {"dependencies", pkg.dependencies},
+    }.dump();
+    // Both edge sets carry whatever the manifest declared. The package
+    // manager keeps the constrained entries in a SEPARATE list from the names
+    // (dependencyConstraints), so the two views are stitched back together
+    // here — the same shape the Qt arm gets straight from embedded metadata.
+    // An absent optional field means "unconstrained", which is the empty string
+    // on this side.
+    auto toGate = [](const PackageDependency& d) {
+        return LogosCore::ModuleDependency{
+            d.name,
+            d.version.value_or(std::string()),
+            d.signer.value_or(std::string()),
+            false};
+    };
+
+    std::unordered_map<std::string, LogosCore::ModuleDependency> constrained;
+    for (const auto& c : pkg.dependencyConstraints)
+        constrained[c.name] = toGate(c);
+
+    // Driven by `dependencies`, never by the constraint list: that list is a
+    // subset view, and an edge exists because the manifest declared it, not
+    // because it declared a range for it.
+    info.dependencies = toDependencyEntries(pkg.dependencies);
+    for (auto& dep : info.dependencies) {
+        auto constraint = constrained.find(dep.name);
+        if (constraint != constrained.end())
+            dep = constraint->second;
+    }
+
+    info.optionalDependencies.clear();
+    for (const auto& o : pkg.optionalDependencies)
+        info.optionalDependencies.push_back(toGate(o));
+
+    spdlog::debug("Registered Bare module {} from {}", name, pkg.mainFilePath);
     return name;
 }
 
@@ -299,6 +389,19 @@ nlohmann::json ModuleRegistry::allModulesInfo() const {
                                     ? nlohmann::json(*info.published)
                                     : nlohmann::json(nullptr);
         entry["published_at"] = info.publishedAt;
+        // The artifact shape, so a consumer can tell a module running in the
+        // Native container from one in a subprocess without inferring it from
+        // the pid sentinel. "" for a Qt plugin.
+        entry["format"]       = info.format;
+        // The module's process id while it is loaded, or null when it is not.
+        // -1 is NOT "unknown": it is the LoadedModuleHandle sentinel for a
+        // module that has no process of its own, which is every module the
+        // Native container runs. Reported here so a consumer can answer "which
+        // container is this in?" from the snapshot rather than by asking the
+        // stats call, which only answers for modules that are running.
+        entry["pid"]          = info.loaded
+                                    ? nlohmann::json(info.handle.pid)
+                                    : nlohmann::json(nullptr);
         // Names only: the documented shape of this field (logos_core.h) and of
         // the modules_state snapshot record built from it.
         entry["dependencies"] = dependencyNames(info.dependencies);
@@ -361,6 +464,12 @@ std::string ModuleRegistry::moduleVersion(const std::string& name) const {
     std::shared_lock lock(m_mutex);
     auto it = m_modules.find(name);
     return it != m_modules.end() ? it->second.version : std::string{};
+}
+
+std::string ModuleRegistry::moduleFormat(const std::string& name) const {
+    std::shared_lock lock(m_mutex);
+    auto it = m_modules.find(name);
+    return it != m_modules.end() ? it->second.format : std::string{};
 }
 
 std::vector<std::string> ModuleRegistry::moduleDependenciesLocked(const std::string& name,
