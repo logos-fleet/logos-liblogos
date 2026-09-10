@@ -24,6 +24,8 @@
 #include "composite_module_loader.h"
 #include "module_manager.h"
 
+#include "module_registry.h"
+
 #include <in_memory_channel.h>
 #include <message_channel.h>
 #include <web_message_codec.h>
@@ -35,12 +37,17 @@
 #include <QVariant>
 #include <QVariantList>
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 using logos::plain::AnyMessage;
@@ -649,4 +656,134 @@ TEST(WebContainerPolicyTest, WebIsAContainerTheOperatorCanAssert)
     EXPECT_EQ(ModuleManager::containerPolicy(), "web");
 
     ModuleManager::setContainerPolicy(saved);
+}
+
+// ── discovery: what makes a package a `web` module in the first place ───────
+//
+// The container above answers for a descriptor that is ALREADY stamped
+// `format = "web"`. Nothing stamps it but ModuleRegistry::discoverInstalledModules,
+// and it does so on the filename alone — so the rule that decides which of the
+// three arms a scanned package takes has to be asserted on real directories,
+// not on a hand-built descriptor.
+
+namespace {
+
+// A package directory the package manager will scan: manifest.json declaring a
+// plain-string `main`, and that file, written where the manifest says. The same
+// shape createFakeModule builds in test_module_manager.cpp, kept local because
+// this file drives ModuleRegistry directly rather than through the C API.
+void plantPackage(const std::filesystem::path& modulesDir,
+                  const std::string& name,
+                  const std::string& mainFile)
+{
+    const std::filesystem::path dir = modulesDir / name;
+    std::filesystem::create_directories(dir);
+
+    const nlohmann::json manifest{
+        {"name", name},
+        {"version", "1.0.0"},
+        {"type", "core"},
+        {"main", mainFile},
+        {"description", "a planted package"},
+    };
+    std::ofstream(dir / "manifest.json") << manifest.dump();
+    std::ofstream(dir / mainFile) << "not read by discovery";
+}
+
+// A scratch modules directory that removes itself.
+class ScopedModulesDir {
+public:
+    ScopedModulesDir()
+        : m_path(std::filesystem::temp_directory_path()
+                 / ("logos-web-discovery-" + std::to_string(::getpid()) + "-"
+                    + std::to_string(s_counter++)))
+    {
+        std::filesystem::create_directories(m_path);
+    }
+    ~ScopedModulesDir()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(m_path, ec);
+    }
+
+    const std::filesystem::path& path() const { return m_path; }
+    std::string str() const { return m_path.string(); }
+
+private:
+    std::filesystem::path m_path;
+    static std::atomic<int> s_counter;
+};
+
+std::atomic<int> ScopedModulesDir::s_counter{0};
+
+// The `format` discovery stamped on `name`, or "<absent>" when the scan did not
+// register it at all.
+std::string discoveredFormat(const ScopedModulesDir& dir, const std::string& name)
+{
+    ModuleRegistry registry;
+    registry.setModulesDir(dir.str());
+    registry.discoverInstalledModules();
+
+    for (const auto& entry : registry.allModulesInfo()) {
+        if (entry.value("name", std::string()) == name)
+            return entry.value("format", std::string());
+    }
+    return "<absent>";
+}
+
+} // namespace
+
+TEST(WebDiscoveryTest, AnHtmlEntryDocumentIsStampedWeb)
+{
+    ScopedModulesDir dir;
+    plantPackage(dir.path(), "js_counter", "index.html");
+
+    // The whole reason the container ever sees `format == "web"`.
+    EXPECT_EQ(discoveredFormat(dir, "js_counter"), "web");
+}
+
+TEST(WebDiscoveryTest, TheExtensionIsMatchedCaseInsensitivelyAndHtmCounts)
+{
+    // `.htm` because it is a page, and case-folded because a filename's case is
+    // not the author's statement about anything — on a case-insensitive
+    // filesystem it is not even stable.
+    ScopedModulesDir upper;
+    plantPackage(upper.path(), "shouty_page", "INDEX.HTML");
+    EXPECT_EQ(discoveredFormat(upper, "shouty_page"), "web");
+
+    ScopedModulesDir htm;
+    plantPackage(htm.path(), "short_page", "index.htm");
+    EXPECT_EQ(discoveredFormat(htm, "short_page"), "web");
+
+    ScopedModulesDir mixed;
+    plantPackage(mixed.path(), "mixed_page", "Index.Htm");
+    EXPECT_EQ(discoveredFormat(mixed, "mixed_page"), "web");
+}
+
+TEST(WebDiscoveryTest, ABareImageIsStillBareAndAPluginIsStillNeitherArm)
+{
+    // The three arms are mutually exclusive, and this is the assertion that
+    // adding the `web` arm did not move anything that used to take another one.
+    ScopedModulesDir bare;
+    plantPackage(bare.path(), "counter_module", "counter_module_bare.dylib");
+    EXPECT_EQ(discoveredFormat(bare, "counter_module"), "bare");
+
+    // A Qt plugin takes the third arm, which OPENS the file — and this one is
+    // a text file, so it is refused rather than registered. That refusal is the
+    // point: a non-page, non-Bare artifact never reaches the Web container by
+    // accident, it goes to the loader that inspects it.
+    ScopedModulesDir plugin;
+    plantPackage(plugin.path(), "plugin_module", "plugin_module_plugin.dylib");
+    EXPECT_EQ(discoveredFormat(plugin, "plugin_module"), "<absent>");
+}
+
+TEST(WebDiscoveryTest, AnHtmlNamedLikeABareImageIsBare)
+{
+    // Both gates are filename rules and this document satisfies both. The Bare
+    // gate is asked FIRST, so it wins — recorded here because the answer is
+    // arbitrary-looking and a reader deserves to find it asserted rather than
+    // inferred from the order of two `if`s.
+    ScopedModulesDir dir;
+    plantPackage(dir.path(), "ambiguous_module", "ambiguous_module_bare.html");
+    EXPECT_EQ(discoveredFormat(dir, "ambiguous_module"), "bare");
 }
