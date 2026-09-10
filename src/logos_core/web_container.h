@@ -105,15 +105,24 @@ public:
 private:
     struct Instance;
 
+    // Why a module stopped, which is the only thing the two retirement paths
+    // disagree about: an operator unloaded it, or its page went away.
+    enum class Retirement { Unloaded, PageLost };
+
+    // Take a module out of m_modules, tear it down and announce it — EXACTLY
+    // ONCE, whichever path arrives first. The single retirement path there is:
+    // a second death notification for the same page finds nothing to take and
+    // says nothing.
+    void retire(const std::string& name, Retirement why);
+
     // Announce a module's death exactly once, whatever killed it. Hops to the
     // Qt main thread first when it is not already on it -- see the definition,
     // where the reason is a segfault rather than a style preference.
     void announceTermination(const std::string& name);
-    // The announcement itself, on the thread that may run it.
-    void announceTerminationHere(const std::string& name);
 
-    // Lift a module out of m_modules, or nullptr when it is not there. Both
-    // teardown paths go through it, which is what makes them exactly-once.
+    // Lift a module out of m_modules, or nullptr when it is not there. The one
+    // place a module stops being loaded, which is what makes retire()
+    // exactly-once.
     std::unique_ptr<Instance> takeInstance(const std::string& name);
 
     // Unpublish, drop the relay, stop the peer, close the page. Called with

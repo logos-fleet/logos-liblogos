@@ -8,7 +8,6 @@
 #include <QVariant>
 #include <QVariantList>
 
-#include <memory>
 #include <mutex>
 #include <string>
 
@@ -93,6 +92,13 @@ private:
     // page's conversation — with two web modules loaded the ambient ring holds
     // one entry per module and the relay must present its own.
     QString authToken() const;
+
+    // The provider's listener, taken as a COPY under m_eventMutex. Copied
+    // rather than invoked under the lock: the listener runs transport code and
+    // may re-enter this glue, and it is read from the transport's delivery
+    // thread while registration writes it from another. Same accessor, for the
+    // same reason, as BareModuleGlue::eventListener().
+    EventCallback eventListener() const;
 
     std::string m_name;
     std::string m_version;

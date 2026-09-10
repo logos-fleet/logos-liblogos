@@ -90,13 +90,14 @@ void WebModuleGlue::setEventListener(EventCallback callback)
     // second round trip against a page that may not be serving yet.
     m_subscribed = true;
     m_page->onEvent(QString(), [this](const QString& name, const QVariantList& data) {
-        EventCallback cb;
-        {
-            std::lock_guard<std::mutex> g(m_eventMutex);
-            cb = m_eventCallback;
-        }
-        if (cb) cb(name, data);
+        if (EventCallback cb = eventListener()) cb(name, data);
     });
+}
+
+WebModuleGlue::EventCallback WebModuleGlue::eventListener() const
+{
+    std::lock_guard<std::mutex> g(m_eventMutex);
+    return m_eventCallback;
 }
 
 bool WebModuleGlue::deliverCredential(const QString& token)

@@ -261,10 +261,10 @@ LoadOutcome WebContainer::awaitLoad(const std::string& name,
 
 // Lift a module out of the map, or nullptr when it is not there.
 //
-// The single place a module stops being loaded, which is what makes both
-// teardown paths EXACTLY ONCE: a second death notification for the same page —
-// a renderer crash the backend reports twice, or a kill racing a deliberate
-// unload — finds nothing and says nothing.
+// The single place a module stops being loaded, which is what makes retire()
+// EXACTLY ONCE: a second death notification for the same page — a renderer
+// crash the backend reports twice, or a kill racing a deliberate unload —
+// finds nothing and says nothing.
 std::unique_ptr<WebContainer::Instance> WebContainer::takeInstance(const std::string& name)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -275,20 +275,31 @@ std::unique_ptr<WebContainer::Instance> WebContainer::takeInstance(const std::st
     return instance;
 }
 
-void WebContainer::terminate(const std::string& name)
+// The one retirement path. A deliberate unload and a lost page differ only in
+// the line they log: both take the instance out of the map, tear it down and
+// announce it, and whichever arrives first is the one that runs.
+void WebContainer::retire(const std::string& name, Retirement why)
 {
     std::unique_ptr<Instance> instance = takeInstance(name);
     if (!instance) return;
 
     auto onTerminated = instance->onTerminated;
     tearDown(*instance);
-    spdlog::info("Web module stopped: {}", name);
+    if (why == Retirement::PageLost)
+        spdlog::warn("Web module {} lost its page", name);
+    else
+        spdlog::info("Web module stopped: {}", name);
 
     // Announced last, matching the Native and subprocess containers: the
     // callback is the signal that the module is gone, so everything that makes
-    // it gone runs first. ModuleManager's expected-exit mark is what stops this
-    // being reported as a crash.
+    // it gone runs first. ModuleManager's expected-exit mark is what stops an
+    // orderly unload being reported as a crash.
     if (onTerminated) onTerminated(name);
+}
+
+void WebContainer::terminate(const std::string& name)
+{
+    retire(name, Retirement::Unloaded);
 }
 
 // Unpublish, drop the relay, stop the peer, close the page — in that order,
@@ -345,22 +356,11 @@ void WebContainer::announceTermination(const std::string& name)
     if (app && QThread::currentThread() != app->thread()) {
         // `app` as the context object, so a shutdown that outruns this event
         // drops it rather than running teardown against a half-gone process.
-        QMetaObject::invokeMethod(app, [this, name] { announceTerminationHere(name); },
+        QMetaObject::invokeMethod(app, [this, name] { retire(name, Retirement::PageLost); },
                                   Qt::QueuedConnection);
         return;
     }
-    announceTerminationHere(name);
-}
-
-void WebContainer::announceTerminationHere(const std::string& name)
-{
-    std::unique_ptr<Instance> instance = takeInstance(name);
-    if (!instance) return;
-
-    auto onTerminated = instance->onTerminated;
-    tearDown(*instance);
-    spdlog::warn("Web module {} lost its page", name);
-    if (onTerminated) onTerminated(name);
+    retire(name, Retirement::PageLost);
 }
 
 bool WebContainer::hasModule(const std::string& name) const
