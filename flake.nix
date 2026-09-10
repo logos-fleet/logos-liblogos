@@ -2,6 +2,15 @@
   description = "Logos liblogos core library";
 
   inputs = {
+    # THE MOBILE CHAIN'S INPUTS ARE LOCKED TO THE logos-fleet FORKS, not to
+    # these URLs: it needs logos-nix's lib.mkMobileTargets /
+    # lib.mkForAllMobileTargets and iOS third-party overlay, and the
+    # cross-build CMake options in logos-protocol, logos-plugin-qt,
+    # logos-module, logos-package, logos-package-manager and process-stats --
+    # none of which are upstream yet. `nix flake update` would silently move
+    # them back to logos-co and the mobile outputs would stop evaluating;
+    # re-pin with
+    #   nix flake lock --override-input <input> github:logos-fleet/<repo>/<rev>
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
     logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk";
@@ -21,6 +30,13 @@
     logos-capability-module.url = "github:logos-co/logos-capability-module";
     logos-modules-state-module.url = "github:logos-co/logos-modules-state-module";
     logos-module.url = "github:logos-co/logos-module";
+    # The lgx source tree and the cpp-semver engine it needs. Reached directly
+    # (not through logos-package-manager) because the mobile chain builds lgx
+    # from source itself; `follows` keeps ONE logos-package in the closure, so
+    # the lgx the package manager links and the lgx built here are the same
+    # tree.
+    logos-package.url = "github:logos-co/logos-package";
+    logos-package-manager.inputs.logos-package.follows = "logos-package";
     process-stats.url = "github:logos-co/process-stats";
     logos-container.url = "github:logos-co/logos-container";
     logos-module-loader.url = "github:logos-co/logos-module-loader";
@@ -29,7 +45,7 @@
     logos-package-manager.url = "github:logos-co/logos-package-manager";
   };
 
-  outputs = { self, nixpkgs, logos-nix, logos-cpp-sdk, logos-protocol, logos-qt-sdk, logos-plugin-qt, logos-capability-module, logos-modules-state-module, logos-module, logos-package-manager, process-stats, logos-container, default-container, logos-module-loader, default-module-loader }:
+  outputs = { self, nixpkgs, logos-nix, logos-cpp-sdk, logos-protocol, logos-qt-sdk, logos-plugin-qt, logos-capability-module, logos-modules-state-module, logos-module, logos-package, logos-package-manager, process-stats, logos-container, default-container, logos-module-loader, default-module-loader }:
 
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
@@ -89,6 +105,82 @@
           logosPackageManager = logos-package-manager.packages.${system}.lib;
           logosPackageManagerPortable = logos-package-manager.packages.${system}.lib-portable;
         });
+
+      # ── Mobile ────────────────────────────────────────────────────────────
+      # liblogos_core cross-built for iOS (static archives, Qt is static
+      # there) and Android (shared, Qt is shared there). The chain builds all
+      # nine repos in the link set from source -- see nix/mobile/ios.nix for
+      # why it is one chain here rather than a mobile output per repo.
+      #
+      # Mobile pseudo-systems are OPT-IN in logos-nix (an iOS host is
+      # stdenv.isDarwin, so folding them into forAllTargets misroutes every
+      # `if isDarwin` in this file); they are merged onto `packages` below,
+      # keyed the same way x86_64-windows is.
+      #
+      # androidBuildSystem is a parameter, and mkMobilePackages is exposed on
+      # `lib`, because the Android derivations' `system` is their BUILD
+      # platform: the default x86_64-linux cannot be realised on a Mac even
+      # though aarch64-darwin builds the identical closure. Verifying Android
+      # from a Mac is `mkMobilePackages { androidBuildSystem = "aarch64-darwin"; }`.
+      # The chains themselves, keyed by target: an app links the WHOLE set of
+      # prefixes (`chain.all`), and a flake `packages` attribute can only hold
+      # a derivation, so a consumer needs this rather than the packages below.
+      mkMobileChains = { androidBuildSystem ? "x86_64-linux" }:
+        logos-nix.lib.mkForAllMobileTargets
+          (logos-nix.lib.mkMobileTargets { inherit androidBuildSystem; })
+          ({ system, pkgs, buildSystem }:
+            let
+              # Sources, not packages: every one of these is compiled by the
+              # chain for the mobile host.
+              srcs = {
+                protocol = logos-protocol;
+                pluginQt = logos-plugin-qt;
+                package = logos-package;
+                module = logos-module;
+                processStats = process-stats;
+                containerSubprocess = default-container;
+                moduleLoaderQt = default-module-loader;
+                packageManager = logos-package-manager;
+                liblogos = ./.;
+              };
+              # Build-platform packages, taken as they are. Each installs
+              # headers and an INTERFACE-only CMake config and no compiled
+              # object, so there is nothing in them to cross-compile.
+              native = {
+                cppSdk = logos-cpp-sdk.packages.${buildSystem}.default;
+                qtSdk = logos-qt-sdk.packages.${buildSystem}.default;
+                logosContainer = logos-container.packages.${buildSystem}.default;
+                logosModuleLoader = logos-module-loader.packages.${buildSystem}.default;
+                cppSemver = logos-package.packages.${buildSystem}.cpp-semver;
+              };
+              chain = import (
+                if system == "aarch64-android" then ./nix/mobile/android.nix else ./nix/mobile/ios.nix
+              ) { inherit pkgs srcs native; };
+            in
+            chain);
+
+      # The same chains projected onto the flake `packages` schema.
+      mobilePackagesOf = chains:
+        nixpkgs.lib.mapAttrs (_: chain: {
+          logos-liblogos-lib = chain.liblogos;
+          logos-protocol = chain.protocol;
+          logos-qt-host = chain.qtHost;
+          logos-package = chain.lgx;
+          logos-module = chain.logosModule;
+          process-stats = chain.processStats;
+          logos-container-subprocess = chain.containerSubprocess;
+          logos-module-loader-qt = chain.moduleLoaderQt;
+          logos-package-manager = chain.packageManager;
+          default = chain.liblogos;
+        }) chains;
+      mkMobilePackages = args: mobilePackagesOf (mkMobileChains args);
+
+      # One chain per Android build platform; `packages` and `legacyPackages`
+      # below are views of these, so nothing is instantiated twice.
+      mobileChainsFor = nixpkgs.lib.genAttrs logos-nix.lib.androidBuildSystems
+        (androidBuildSystem: mkMobileChains { inherit androidBuildSystem; });
+      # Flake `packages` carry the canonical (x86_64-linux) Android build platform.
+      mobilePackages = mobilePackagesOf mobileChainsFor.x86_64-linux;
     in
     {
       packages = forAllTargets ({ pkgs, system, logosSdk, logosProtocolPkg, logosQtSdk, logosQtHost, capabilityModule, modulesStateModule, logosModule, processStats, logosContainer, logosModuleLoader, defaultContainer, defaultModuleLoader, logosPackageManager, logosPackageManagerPortable }:
@@ -196,7 +288,7 @@
         // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isWindows) {
           logos-liblogos-tests = tests;
         }
-      );
+      ) // mobilePackages;
 
       checks = forAllSystems ({ pkgs, system, defaultModuleLoader, ... }:
         let
@@ -243,6 +335,19 @@
           '';
         }
       );
+
+      lib = { inherit mkMobileChains mkMobilePackages; };
+
+      # The same mobile chain, keyed by the platform that BUILDS it. Flake
+      # `packages` can only name one build system per target, and Android's
+      # canonical one is x86_64-linux; a Mac cannot realise those derivations
+      # even though it can build the identical closure. This is where a Mac
+      # asks for the Android core:
+      #   nix build .#legacyPackages.aarch64-darwin.mobile.aarch64-android.default
+      legacyPackages = nixpkgs.lib.mapAttrs (_: chains: {
+        mobile = mobilePackagesOf chains;
+        mobileChains = chains;
+      }) mobileChainsFor;
 
       devShells = forAllSystems ({ pkgs, ... }: {
         default = pkgs.mkShell {

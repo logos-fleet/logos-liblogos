@@ -3119,11 +3119,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788740724,
-        "narHash": "sha256-dZkwODDIDZzI06YTGiZ4fz/0MTlXFiqnPvYN1v+J3gQ=",
-        "owner": "logos-co",
+        "lastModified": 1789028541,
+        "narHash": "sha256-DvgExZqWaPCd66s4VJhKEkXl8PIV8rCFBa6nnFnkGh0=",
+        "owner": "logos-fleet",
         "repo": "logos-module",
-        "rev": "f71d16ddc5779b50b188b3a3928a37c9ce90b2a1",
+        "rev": "3120dd231ab799e9fe8ace4ae8fe008228cb9a41",
         "type": "github"
       },
       "original": {
@@ -3552,11 +3552,11 @@
         "nixpkgs-windows": "nixpkgs-windows_109"
       },
       "locked": {
-        "lastModified": 1786729772,
-        "narHash": "sha256-7qE/hchFHmaCxoFCI4dtCqv2eHyL6VttgedTas41Lgs=",
-        "owner": "logos-co",
+        "lastModified": 1789041997,
+        "narHash": "sha256-VZtN54U6Py1yhdB7jxzZ4C1jWWOYsRN1UvRtyz/vfGA=",
+        "owner": "logos-fleet",
         "repo": "logos-nix",
-        "rev": "f55bf91b8a723ee5c27c39c773b034255538d280",
+        "rev": "fc87e23b8432675a8de5c61c50e319d7582749ce",
         "type": "github"
       },
       "original": {
@@ -3571,11 +3571,11 @@
         "nixpkgs-windows": "nixpkgs-windows_110"
       },
       "locked": {
-        "lastModified": 1786729772,
-        "narHash": "sha256-7qE/hchFHmaCxoFCI4dtCqv2eHyL6VttgedTas41Lgs=",
+        "lastModified": 1786399295,
+        "narHash": "sha256-Bl1A0UgsIXioZw5uEW8Jl5u7FfZcFMnpYlpsdezFwK0=",
         "owner": "logos-co",
         "repo": "logos-nix",
-        "rev": "f55bf91b8a723ee5c27c39c773b034255538d280",
+        "rev": "6e0f4a7120fced10829b0b3a698ff619a11d4605",
         "type": "github"
       },
       "original": {
@@ -3609,11 +3609,11 @@
         "nixpkgs-windows": "nixpkgs-windows_111"
       },
       "locked": {
-        "lastModified": 1786399295,
-        "narHash": "sha256-Bl1A0UgsIXioZw5uEW8Jl5u7FfZcFMnpYlpsdezFwK0=",
+        "lastModified": 1786729772,
+        "narHash": "sha256-7qE/hchFHmaCxoFCI4dtCqv2eHyL6VttgedTas41Lgs=",
         "owner": "logos-co",
         "repo": "logos-nix",
-        "rev": "6e0f4a7120fced10829b0b3a698ff619a11d4605",
+        "rev": "f55bf91b8a723ee5c27c39c773b034255538d280",
         "type": "github"
       },
       "original": {
@@ -5720,8 +5720,10 @@
     },
     "logos-package-manager_5": {
       "inputs": {
-        "logos-nix": "logos-nix_119",
-        "logos-package": "logos-package_12",
+        "logos-nix": "logos-nix_120",
+        "logos-package": [
+          "logos-package"
+        ],
         "nix-bundle-appimage": "nix-bundle-appimage_8",
         "nix-bundle-dir": "nix-bundle-dir_19",
         "nixpkgs": [
@@ -5731,11 +5733,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1787865382,
-        "narHash": "sha256-mM6TxIbIxsFSHUe6Hd+718qksL2RSVyIJlOBifVJnDY=",
-        "owner": "logos-co",
+        "lastModified": 1789028541,
+        "narHash": "sha256-Ay2XcMJQI6PxPRyppGKPcYzGPFj8lU1Cei4zu+93trQ=",
+        "owner": "logos-fleet",
         "repo": "logos-package-manager",
-        "rev": "d88abaa1f3f5d4a4268d7cdfbec98d816e0a0385",
+        "rev": "e8170abd214ec28dadc3209597552f312e8b9d60",
         "type": "github"
       },
       "original": {
@@ -5800,20 +5802,19 @@
     },
     "logos-package_12": {
       "inputs": {
-        "logos-nix": "logos-nix_120",
+        "logos-nix": "logos-nix_119",
         "nixpkgs": [
-          "logos-package-manager",
           "logos-package",
           "logos-nix",
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1787833864,
-        "narHash": "sha256-v0Nbhy4YXm1d/luboCbIL4yNIgcfkRXVTs1jXucLoVY=",
-        "owner": "logos-co",
+        "lastModified": 1789041961,
+        "narHash": "sha256-A69P5u9WtQRZ66bYLcV0r/7PvEaIqcLnXJlIky2/K0s=",
+        "owner": "logos-fleet",
         "repo": "logos-package",
-        "rev": "49151f003690333764d73f956d64e1245e2a0c38",
+        "rev": "44a31b313e6c057997fb96ba802826f26e2b3a60",
         "type": "github"
       },
       "original": {
@@ -6457,11 +6458,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788890168,
-        "narHash": "sha256-gx8vxNsAU591M11YA5NFbhmCgE6FVaFsVWVvC57/Rk4=",
-        "owner": "logos-co",
+        "lastModified": 1789028517,
+        "narHash": "sha256-wfKujHtjIrzIpCEbNVuv+RRftFxn/7zOwOp7k4rNH8U=",
+        "owner": "logos-fleet",
         "repo": "logos-plugin-qt",
-        "rev": "1a0e399ef238ef3dbed367249f13a87029ca7fc1",
+        "rev": "595274c34247ad41896844cc17f65c643f5437c0",
         "type": "github"
       },
       "original": {
@@ -7121,11 +7122,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788870198,
-        "narHash": "sha256-VNpIg41IEeJZQkTHFld83DOViSs33vrfE6a8P79YsKU=",
-        "owner": "logos-co",
+        "lastModified": 1789041959,
+        "narHash": "sha256-DqoyPK2nIBaJYfEXEbkghVy38UeLTGPw7kDHDt75CV4=",
+        "owner": "logos-fleet",
         "repo": "logos-protocol",
-        "rev": "463863446894764e21dafee34268cbfc1048c64b",
+        "rev": "732748b12f0b71e9324ceda89c1a5487afe0d115",
         "type": "github"
       },
       "original": {
@@ -13380,11 +13381,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786452357,
-        "narHash": "sha256-rjKseurJfMtHLNnsgRcVu1Qc5Q5UgWYxjpf7DCJTreY=",
-        "owner": "logos-co",
+        "lastModified": 1789041963,
+        "narHash": "sha256-KJGPeoy94AJIYPvNwKrknxWDQH81zg+AKSOVLJkM7a0=",
+        "owner": "logos-fleet",
         "repo": "process-stats",
-        "rev": "3e58e1c94b45803a15b29b29a112427efb2764ca",
+        "rev": "28ae028320139beccb95340a8b4a341364d1601e",
         "type": "github"
       },
       "original": {
@@ -13404,6 +13405,7 @@
         "logos-module-loader": "logos-module-loader_2",
         "logos-modules-state-module": "logos-modules-state-module",
         "logos-nix": "logos-nix_118",
+        "logos-package": "logos-package_12",
         "logos-package-manager": "logos-package-manager_5",
         "logos-plugin-qt": "logos-plugin-qt_16",
         "logos-protocol": "logos-protocol_19",
