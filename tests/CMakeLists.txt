@@ -24,6 +24,7 @@ add_executable(logos_core_tests
     test_expected_exit_marks.cpp
     test_load_verdict.cpp
     test_load_concurrency.cpp
+    test_inproc_container.cpp
 )
 
 # Imported container/loader targets the tests drive via SubprocessManager /
@@ -126,5 +127,32 @@ foreach(_fixture dep_range_fixture dep_malformed_fixture)
     # fixtures off it keeps the test binary and its inputs shipping together.
     add_dependencies(logos_core_tests ${_fixture}_plugin)
 endforeach()
+
+# The Bare module the Native container tests dlopen. A plain shared library:
+# no Qt, no logos-protocol, no `lp_*` — which is exactly what "bare" means, and
+# what lets this one be opened by a test binary rather than by a host image.
+#
+# MODULE rather than SHARED for the same reason the Qt fixtures above are: it is
+# dlopen'd, never linked. The name carries the `_bare` suffix the production
+# discovery gate keys on, so the fixture is also the only thing asserting that
+# convention end to end.
+add_library(bare_fixture_module MODULE fixtures/bare_fixture_module.cpp)
+set_target_properties(bare_fixture_module PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "bare_fixture_bare"
+)
+if(APPLE)
+    set_target_properties(bare_fixture_module PROPERTIES SUFFIX ".dylib")
+endif()
+# The version macros only — <logos_protocol.h> declares the lp_* C ABI and
+# includes nothing, and the fixture CALLS none of it, so this adds a header path
+# and no link dependency. It is what lets the fixture report this build's own
+# protocol version and never fail the container's runtime major handshake for a
+# reason unrelated to the test.
+target_include_directories(bare_fixture_module PRIVATE
+    ${LOGOS_PROTOCOL_ROOT}/include
+    ${LOGOS_PROTOCOL_ROOT}/include/cpp
+)
+add_dependencies(logos_core_tests bare_fixture_module)
 
 gtest_discover_tests(logos_core_tests DISCOVERY_MODE PRE_TEST)

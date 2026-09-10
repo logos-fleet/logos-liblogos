@@ -22,7 +22,11 @@ logos-liblogos/
 │       ├── dependency_resolver.h/cpp    # Topological sort with circular dependency detection
 │       ├── module_loader.h              # Abstract ModuleLoader base (Qt-free)
 │       ├── composite_module_loader.h/cpp # Pairs a container + format loader into a ModuleLoader
-│       └── module_loader_registry.h/cpp  # Registry of ModuleLoader implementations
+│       ├── module_loader_registry.h/cpp  # Registry of ModuleLoader implementations
+│       ├── bare_module_abi.h/cpp         # Opens a Bare module image and resolves the module-impl C ABI
+│       ├── bare_module_glue.h/cpp        # THE generic host glue: dispatch by name, contract read at runtime
+│       ├── bare_module_loader.h/cpp      # ModuleFormatLoader for the Bare module shape
+│       └── inproc_container.h/cpp        # The NATIVE CONTAINER: runs a Bare module in the host process
 │   (the Qt-plugin loader + logos_host_qt binary now live in the external
 │    logos-module-loader-qt package — see "External packages" below)
 ├── tests/                               # Google Test suite
@@ -80,6 +84,49 @@ it consumes `process-stats`.
   — the whole Qt-plugin mechanism:
   - `logos_module_loader_qt` static lib — `QtPluginFormatLoader` (parent side, light: boost::dll + spdlog), included as `<logos_module_loader_qt/...>` and linked into `logos_core`
   - `logos_host_qt` binary — the child-side host (`logos_host`, `command_line_parser`, `module_initializer`, `qt_app`, `token_source`), linking the full SDK stack + Qt. liblogos no longer builds it; `bin.nix` re-exports it from this package so frontends are unaffected.
+
+### The Native container
+
+Alongside the subprocess container reached through `makeContainer()`, the core
+builds a SECOND loader of its own: `InProcContainer` + `BareModuleFormatLoader`,
+registered in the same `ModuleLoaderRegistry`. It runs a **Bare module** — a
+module compiled down to its implementation with no Qt and no logos-protocol
+inside, exporting the module-impl C ABI (`<logos_module_impl.h>`) and resolving
+every `lp_*` upward against the host image — inside the host process:
+
+- `bare_module_abi` opens the image `RTLD_NOW | RTLD_LOCAL` and resolves the
+  ABI, reporting a missing file, an unloadable image or an absent entry point as
+  a load ERROR rather than a crash.
+- `bare_module_glue` is the one generic host glue: it dispatches by name with
+  JSON, reads the contract at runtime from `logos_module_get_methods()` (so the
+  return-shape sets the SDK's *generated* Qt glue bakes in as literals are
+  derived instead), and forwards events through the emit callback. Nothing in it
+  names a module, so adding one to a build is never a code-generation step.
+- `InProcContainer` publishes the module under its own name on the host's normal
+  transport, so core_service, capability_module and every other module reach it
+  exactly as they reach a subprocess module. Its `LoadedModuleHandle::pid` is
+  the documented in-process sentinel, `-1`.
+
+Which container runs a module is decided by the ARTIFACT, not by a flag:
+`ModuleRegistry` records `format = "bare"` for a `*_bare.<ext>` main file at
+discovery (reading its identity and edges from the package manifest, since a
+Bare module carries no Qt plugin metadata), and only this pair claims that
+format. `logos_core_set_container_policy` lets an operator ASSERT which
+container everything must be in — the flag behind `logoscore --container` — and
+refuses a mismatch rather than silently using the other one.
+
+Not reached through the `makeContainer()` seam: that seam is link-time and
+admits exactly one provider, which is the right shape for "which container is
+the default" and the wrong shape for "which containers exist".
+
+Two limits, stated rather than left to be found. The Native container buys
+reachability where store rules forbid a subprocess (ADR 0003/0006), NOT crash
+containment — a Bare module that faults takes the host with it. And a Bare
+module's OUTBOUND calls still read the host's ambient token ring, because every
+`lp_token_*` entry point reads `TokenManager::instance()`; the inbound half is
+isolated (each module gets `LogosAPI::forIdentity` plus the core's credential
+via `TokenManager::adoptCredentialFor`), so a call INTO a module authorizes as
+that module.
 
 The `ModuleLoader` base, the `CompositeModuleLoader` / `ModuleLoaderRegistry`
 orchestration, the `isValidModuleName` allowlist (in `module_registry`), and the

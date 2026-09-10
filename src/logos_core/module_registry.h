@@ -10,6 +10,9 @@
 #include <vector>
 #include <unordered_map>
 #include <shared_mutex>
+// InstalledPackage — the package-manager's view of a scanned module, which is
+// the only metadata a Bare module has (it carries none of its own).
+#include <package_manager_lib.h>
 
 namespace logos {
 
@@ -53,6 +56,13 @@ struct ModuleInfo {
     // and every one of them must ignore this one.
     std::vector<LogosCore::ModuleDependency> optionalDependencies;
     std::vector<std::string> optionalDependents;
+    // Which SHAPE this module's main file is, and therefore which container
+    // can run it. Empty (the overwhelming default) means a Qt plugin, the only
+    // shape that existed before the Native container; "bare" is a Bare module
+    // image — no Qt plugin metadata, the module-impl C ABI instead, run
+    // in-process by InProcContainer. Set at discovery, read by
+    // ModuleManager::loadModuleInternal when it stamps ModuleDescriptor::format.
+    std::string format;
     bool loaded = false;
     // Unix timestamp (seconds) of the most recent load, set by markLoaded and
     // cleared to 0 by markUnloaded. 0 ⟺ not currently loaded. Callers derive a
@@ -84,9 +94,12 @@ public:
     std::string modulePath(const std::string& name) const;
     // A JSON array describing every known module: one object per module with
     // its name, path, loaded flag, load timestamp (loaded_at, unix seconds; 0
-    // when not loaded), direct dependencies, direct dependents, and full
-    // embedded metadata (parsed from the cached metadata JSON; null when
-    // unreadable). This is the data backing logos_core_get_modules_info.
+    // when not loaded), artifact `format` ("" for a Qt plugin, "bare" for a
+    // Bare module image), `pid` (the loaded module's process id, -1 for a
+    // module the Native container runs in-process, null when not loaded),
+    // direct dependencies, direct dependents, and full embedded metadata
+    // (parsed from the cached metadata JSON; null when unreadable). This is the
+    // data backing logos_core_get_modules_info.
     nlohmann::json allModulesInfo() const;
     // Forward-edge accessor. `recursive=false` returns the direct
     // dependencies stored on ModuleInfo. `recursive=true` walks the forward
@@ -100,6 +113,9 @@ public:
     moduleDependencyEntries(const std::string& name) const;
     // A module's own version, or "" when it is unknown or carries no stamp.
     std::string moduleVersion(const std::string& name) const;
+    // The module's artifact shape: "" for a Qt plugin, "bare" for a Bare module
+    // image. Read by the load path to decide which container can run it.
+    std::string moduleFormat(const std::string& name) const;
     // Reverse-edge accessor. `recursive=false` returns the direct
     // dependents stored on ModuleInfo. `recursive=true` walks the reverse
     // graph breadth-first and returns every transitive dependent. Unknown
@@ -163,6 +179,19 @@ private:
     // raw processModule() host API), the embedded name is used as before.
     std::string processModuleInternal(const std::string& modulePath,
                                       const std::string& trustedName = {});
+
+    // The Bare-module arm of the same upsert.
+    //
+    // A Bare module carries NO Qt plugin metadata — that is what "bare" means —
+    // so processModuleInternal's very first step, extractMetadata(), finds
+    // nothing and it refuses the module. Its identity and its dependency edges
+    // come from the package manifest instead, which the package manager has
+    // already read and validated, and which is the trusted source in any case
+    // (processModuleInternal only ever CHECKS the embedded name against it).
+    //
+    // Returns the registered name, or "" when `pkg` is not a Bare module or its
+    // name is not a valid module identifier.
+    std::string processBareModuleInternal(const InstalledPackage& pkg);
 
     // Re-derives every ModuleInfo::dependents list by inverting the
     // dependencies edges across m_modules. Called at the tail of

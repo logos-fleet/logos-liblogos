@@ -54,6 +54,14 @@ namespace ModuleManager {
     // BEFORE logos_core_start(). Empty clears any previously set policy.
     void setAccessPolicy(const std::string& policyJson);
 
+    // The operator's container assertion — "auto" | "inproc" | "subprocess".
+    // See logos_core_set_container_policy in logos_core.h for what each means
+    // and why it constrains rather than selects. An empty string resets to
+    // "auto"; an unrecognised value is rejected and leaves the policy alone.
+    // Returns false for a value it did not accept.
+    bool setContainerPolicy(const std::string& policy);
+    std::string containerPolicy();
+
     // Allowed callers core would register for `target` (see the .cpp).
     // A pure read with no RPC — exposed so tests can observe the derivation.
     std::vector<std::string> computeDerivedAllowedCallers(const std::string& target);
