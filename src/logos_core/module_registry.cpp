@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <unordered_set>
 #include <filesystem>
+#include <string_view>
 #include <module_lib/module_lib.h>
 #include <package_manager_lib.h>
 
@@ -83,11 +84,10 @@ std::vector<LogosCore::ModuleDependency> toDependencyEntries(
 // thing an LGX package can get wrong about itself, and the shape is already
 // decided by which output the builder produced.
 bool looksLikeBareModule(const std::string& mainFilePath) {
-    const std::string stem =
-        std::filesystem::path(mainFilePath).stem().string();
-    static const std::string kSuffix = "_bare";
+    constexpr std::string_view kSuffix = "_bare";
+    const std::string stem = std::filesystem::path(mainFilePath).stem().string();
     return stem.size() > kSuffix.size() &&
-           stem.compare(stem.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+           std::string_view(stem).substr(stem.size() - kSuffix.size()) == kSuffix;
 }
 
 }  // namespace
@@ -339,15 +339,20 @@ std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pk
             false};
     };
 
+    std::unordered_map<std::string, LogosCore::ModuleDependency> constrained;
+    for (const auto& c : pkg.dependencyConstraints)
+        constrained[c.name] = toGate(c);
+
+    // Driven by `dependencies`, never by the constraint list: that list is a
+    // subset view, and an edge exists because the manifest declared it, not
+    // because it declared a range for it.
     info.dependencies = toDependencyEntries(pkg.dependencies);
     for (auto& dep : info.dependencies) {
-        for (const auto& c : pkg.dependencyConstraints) {
-            if (c.name == dep.name) {
-                dep.versionRange = c.version.value_or(std::string());
-                dep.signer = c.signer.value_or(std::string());
-            }
-        }
+        auto constraint = constrained.find(dep.name);
+        if (constraint != constrained.end())
+            dep = constraint->second;
     }
+
     info.optionalDependencies.clear();
     for (const auto& o : pkg.optionalDependencies)
         info.optionalDependencies.push_back(toGate(o));

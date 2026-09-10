@@ -60,20 +60,20 @@ long long firstInt(const char* argsJson, long long fallback)
     return std::strtoll(p, nullptr, 10);
 }
 
-std::string quoteSwapped(const std::string& in)
-{
-    std::string out = in;
-    for (char& c : out)
-        if (c == '"') c = '\'';
-    return out;
-}
-
 long long secondInt(const char* argsJson, long long fallback)
 {
     if (!argsJson) return fallback;
     const char* comma = std::strchr(argsJson, ',');
     if (!comma) return fallback;
     return firstInt(comma, fallback);
+}
+
+std::string quoteSwapped(const std::string& in)
+{
+    std::string out = in;
+    for (char& c : out)
+        if (c == '"') c = '\'';
+    return out;
 }
 
 } // namespace

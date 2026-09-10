@@ -1,9 +1,7 @@
 #include "bare_module_glue.h"
 
-#include <logos_api.h>
 #include <logos_json_convert.h>
 #include <logos_types.h>
-#include <token_manager.h>
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -262,30 +260,33 @@ void BareModuleGlue::aboutToUnload(int graceMs)
     if (!m_abi.aboutToUnload)
         return;
 
-    std::mutex m;
-    std::condition_variable cv;
-    bool done = false;
-
-    struct Waiter { std::mutex* m; std::condition_variable* cv; bool* done; } waiter{&m, &cv, &done};
+    // The whole rendezvous in one object, so the module's callback carries a
+    // single void* rather than three pointers into this frame.
+    struct Waiter {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool done = false;
+    } waiter;
 
     if (m_abi.setUnloadDoneCallback) {
         m_abi.setUnloadDoneCallback([](void* ud) {
             auto* w = static_cast<Waiter*>(ud);
             {
-                std::lock_guard<std::mutex> lock(*w->m);
-                *w->done = true;
+                std::lock_guard<std::mutex> lock(w->mutex);
+                w->done = true;
             }
-            w->cv->notify_all();
+            w->cv.notify_all();
         }, &waiter);
     }
 
     const bool pending = m_abi.aboutToUnload() == 1;
     if (pending && m_abi.setUnloadDoneCallback) {
-        std::unique_lock<std::mutex> lock(m);
+        std::unique_lock<std::mutex> lock(waiter.mutex);
         // BOUNDED. Returning 1 buys a grace period, not a veto: a module that
         // never signals delays this teardown by `graceMs` and is torn down
         // anyway.
-        if (!cv.wait_for(lock, std::chrono::milliseconds(graceMs), [&] { return done; }))
+        if (!waiter.cv.wait_for(lock, std::chrono::milliseconds(graceMs),
+                                [&] { return waiter.done; }))
             spdlog::warn("Bare module {} did not finish its teardown within {}ms; "
                          "unloading anyway", m_name, graceMs);
     }

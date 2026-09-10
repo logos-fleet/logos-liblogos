@@ -31,6 +31,11 @@ struct InProcContainer::Instance {
 
 namespace {
 
+// What a module whose manifest declares no version is published as. A version
+// is what a consumer's constraint is matched against, so the provider needs
+// SOME answer; this is the one the module-builder's own template starts from.
+constexpr const char* kDefaultModuleVersion = "1.0.0";
+
 // The host-services policy, mirroring the subprocess loader's: which module may
 // hold the trust-root services is decided by the HOST and bound to the name the
 // registry trusts, never to anything the module asserts about itself.
@@ -109,11 +114,11 @@ bool InProcContainer::launch(const ModuleDescriptor& desc,
     instance->abi = abi;
     instance->onTerminated = std::move(onTerminated);
 
-    std::string moduleVersion;
-    if (desc.rawMetadata.is_object())
-        moduleVersion = desc.rawMetadata.value("version", std::string("1.0.0"));
+    std::string moduleVersion = desc.rawMetadata.is_object()
+        ? desc.rawMetadata.value("version", std::string())
+        : std::string();
     if (moduleVersion.empty())
-        moduleVersion = "1.0.0";
+        moduleVersion = kDefaultModuleVersion;
 
     instance->glue = std::make_unique<BareModuleGlue>(desc.name, moduleVersion, instance->abi);
 

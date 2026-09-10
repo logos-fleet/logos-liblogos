@@ -68,20 +68,28 @@ std::string imageError()
 }
 #endif
 
-// Resolve `name` into `slot`. Returns false only for a REQUIRED symbol that is
-// absent; optional symbols report their absence by leaving `slot` null.
+// Resolve `name` into `slot`. False when the symbol is absent, with `error`
+// (when non-null) naming the entry point that was missing.
 template <typename Fn>
-bool resolve(void* handle, const char* name, Fn& slot, bool required,
-             std::string* error)
+bool resolveRequired(void* handle, const char* name, Fn& slot, std::string* error)
 {
     slot = reinterpret_cast<Fn>(imageSymbol(handle, name));
-    if (slot || !required)
+    if (slot)
         return true;
     if (error)
         *error = std::string("the module exports no ") + name +
                  " — it is not a Bare module built against logos-protocol's "
                  "module-impl C ABI";
     return false;
+}
+
+// Resolve `name` into `slot` if the module exports it. Absence is a fact about
+// the module's vintage rather than a defect (see the header), so it is reported
+// by leaving `slot` null and nothing else.
+template <typename Fn>
+void resolveOptional(void* handle, const char* name, Fn& slot)
+{
+    slot = reinterpret_cast<Fn>(imageSymbol(handle, name));
 }
 
 } // namespace
@@ -110,25 +118,25 @@ bool openBareModule(const std::string& path, BareModuleAbi& out, std::string* er
     BareModuleAbi abi;
     abi.handle = handle;
 
-    const bool required =
-           resolve(handle, "logos_module_dispatch",          abi.dispatch,        true, error)
-        && resolve(handle, "logos_module_get_methods",       abi.getMethods,      true, error)
-        && resolve(handle, "logos_module_string_free",       abi.stringFree,      true, error)
-        && resolve(handle, "logos_module_set_context",       abi.setContext,      true, error)
-        && resolve(handle, "logos_module_set_emit_callback", abi.setEmitCallback, true, error)
-        && resolve(handle, "logos_module_accept_token",      abi.acceptToken,     true, error)
-        && resolve(handle, "logos_module_get_protocol_version", abi.protocolVersion, true, error);
+    const bool haveRequiredAbi =
+           resolveRequired(handle, "logos_module_dispatch",          abi.dispatch,        error)
+        && resolveRequired(handle, "logos_module_get_methods",       abi.getMethods,      error)
+        && resolveRequired(handle, "logos_module_string_free",       abi.stringFree,      error)
+        && resolveRequired(handle, "logos_module_set_context",       abi.setContext,      error)
+        && resolveRequired(handle, "logos_module_set_emit_callback", abi.setEmitCallback, error)
+        && resolveRequired(handle, "logos_module_accept_token",      abi.acceptToken,     error)
+        && resolveRequired(handle, "logos_module_get_protocol_version", abi.protocolVersion, error);
 
-    if (!required) {
+    if (!haveRequiredAbi) {
         imageClose(handle);
         return false;
     }
 
-    resolve(handle, "logos_module_accept_inbound_token",    abi.acceptInboundToken,    false, nullptr);
-    resolve(handle, "logos_module_grant_host_services",     abi.grantHostServices,     false, nullptr);
-    resolve(handle, "logos_module_set_call_caller",         abi.setCallCaller,         false, nullptr);
-    resolve(handle, "logos_module_set_unload_done_callback", abi.setUnloadDoneCallback, false, nullptr);
-    resolve(handle, "logos_module_about_to_unload",         abi.aboutToUnload,         false, nullptr);
+    resolveOptional(handle, "logos_module_accept_inbound_token",     abi.acceptInboundToken);
+    resolveOptional(handle, "logos_module_grant_host_services",      abi.grantHostServices);
+    resolveOptional(handle, "logos_module_set_call_caller",          abi.setCallCaller);
+    resolveOptional(handle, "logos_module_set_unload_done_callback", abi.setUnloadDoneCallback);
+    resolveOptional(handle, "logos_module_about_to_unload",          abi.aboutToUnload);
 
     out = abi;
     return true;

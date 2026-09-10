@@ -281,7 +281,6 @@ namespace {
         expectedExits().clear();
     }
 
-    // Both guarded by configMutex(). parsedEnforcePolicy is set only in enforce mode.
     // The operator's container assertion. Guarded by loadMutex()'s successor
     // (fleetMutex) on read, and written before any load runs.
     std::string& containerPolicyValue() {
@@ -289,6 +288,40 @@ namespace {
         return p;
     }
 
+    // Does `policy` forbid running the module `name` out of a `format`
+    // artifact? Answers the reason it does, or nullptr when the load may
+    // proceed. See logos_core_set_container_policy for what each policy means.
+    //
+    // The runtime's OWN modules are exempt, and this is not a loophole.
+    // capability_module and modules_state are loaded by the core itself,
+    // unconditionally, before any operator module — a policy that refused them
+    // would turn `--container inproc` into "start a core with no
+    // capability_module", i.e. a core in which every cross-module call is
+    // refused, which is not what anyone asking for the Native container means.
+    // They ship as Qt plugins and become Bare when the Bundled-set build makes
+    // them so; until then the assertion governs the modules the OPERATOR chose
+    // to load, which is where it has something to assert.
+    const char* containerPolicyMismatch(const std::string& policy,
+                                        const std::string& name,
+                                        const std::string& format) {
+        static const std::string kPolicyExempt[] =
+            {"capability_module", "modules_state", "core", "core_service"};
+        if (std::find(std::begin(kPolicyExempt), std::end(kPolicyExempt), name)
+                != std::end(kPolicyExempt))
+            return nullptr;
+
+        const bool isBare = (format == "bare");
+        if (policy == "inproc" && !isBare)
+            return "the container policy is 'inproc' but this module is a Qt "
+                   "plugin, which only a subprocess host can run — it ships no "
+                   "Bare module artifact";
+        if (policy == "subprocess" && isBare)
+            return "the container policy is 'subprocess' but this module is a "
+                   "Bare module image, which only the Native container can run";
+        return nullptr;
+    }
+
+    // Both guarded by configMutex(). parsedEnforcePolicy is set only in enforce mode.
     std::string& accessPolicyJson() {
         static std::string s;
         return s;
@@ -812,41 +845,13 @@ namespace {
         // load is refused, because the alternative is running the module in
         // the container the operator explicitly said not to and reporting
         // success. See logos_core_set_container_policy.
-        {
-            const std::string policy = containerPolicyValue();
-            // The runtime's OWN modules are exempt, and this is not a
-            // loophole. capability_module and modules_state are loaded by the
-            // core itself, unconditionally, before any operator module — a
-            // policy that refused them would turn `--container inproc` into
-            // "start a core with no capability_module", i.e. a core in which
-            // every cross-module call is refused, which is not what anyone
-            // asking for the Native container means. They ship as Qt plugins
-            // and become Bare when the Bundled-set build makes them so; until
-            // then the assertion governs the modules the OPERATOR chose to
-            // load, which is where it has something to assert.
-            static const std::vector<std::string> kPolicyExempt =
-                {"capability_module", "modules_state", "core", "core_service"};
-            const bool exempt =
-                std::find(kPolicyExempt.begin(), kPolicyExempt.end(), name)
-                    != kPolicyExempt.end();
-            const bool isBare = (desc.format == "bare");
-            const char* mismatch = nullptr;
-            if (exempt)
-                ;   // see kPolicyExempt above
-            else if (policy == "inproc" && !isBare)
-                mismatch = "the container policy is 'inproc' but this module is a Qt "
-                           "plugin, which only a subprocess host can run — it ships no "
-                           "Bare module artifact";
-            else if (policy == "subprocess" && isBare)
-                mismatch = "the container policy is 'subprocess' but this module is a "
-                           "Bare module image, which only the Native container can run";
-            if (mismatch) {
-                spdlog::error("Refusing to load module {}: {}", name, mismatch);
-                logos::ModuleStateObserver::instance().record(
-                    name, logos::module_state::kUnloaded, logos::module_state::kError,
-                    std::nullopt, std::nullopt, mismatch);
-                return false;
-            }
+        if (const char* mismatch =
+                containerPolicyMismatch(containerPolicyValue(), name, desc.format)) {
+            spdlog::error("Refusing to load module {}: {}", name, mismatch);
+            logos::ModuleStateObserver::instance().record(
+                name, logos::module_state::kUnloaded, logos::module_state::kError,
+                std::nullopt, std::nullopt, mismatch);
+            return false;
         }
         desc.dependencies = registryInstance().moduleDependencies(name);
         desc.modulesDirs  = registryInstance().modulesDirs();

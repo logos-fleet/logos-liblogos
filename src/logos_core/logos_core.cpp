@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 
 // === C API Implementation (Thin Wrappers) ===
@@ -140,10 +141,11 @@ char* logos_core_get_module_stats() {
     if (!stats.is_array())
         stats = nlohmann::json::array();
 
-    std::unordered_map<std::string, bool> reported;
-    for (const auto& entry : stats)
+    std::unordered_set<std::string> reported;
+    for (const auto& entry : stats) {
         if (entry.is_object() && entry.contains("name") && entry["name"].is_string())
-            reported[entry["name"].get<std::string>()] = true;
+            reported.insert(entry["name"].get<std::string>());
+    }
 
     for (const auto& [name, pid] : pids) {
         if (pid >= 0 || reported.count(name))

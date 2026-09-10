@@ -189,8 +189,9 @@ private:
     // already read and validated, and which is the trusted source in any case
     // (processModuleInternal only ever CHECKS the embedded name against it).
     //
-    // Returns the registered name, or "" when `pkg` is not a Bare module or its
-    // name is not a valid module identifier.
+    // Called for a package the discovery gate already identified as a Bare
+    // module (looksLikeBareModule). Returns the registered name, or "" when
+    // that name is not a valid module identifier.
     std::string processBareModuleInternal(const InstalledPackage& pkg);
 
     // Re-derives every ModuleInfo::dependents list by inverting the

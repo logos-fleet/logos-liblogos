@@ -6,7 +6,6 @@
 #include <logos_container/module_container.h>
 
 #include <chrono>
-
 #include <functional>
 #include <memory>
 #include <mutex>

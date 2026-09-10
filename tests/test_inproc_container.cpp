@@ -428,7 +428,7 @@ TEST(BareModuleFormatLoaderTest, PairsIntoAModuleLoaderTheRegistryUnderstands)
 
 // ── what the snapshot says about a module with no process ───────────────────
 
-TEST(InProcModulesInfoTest, ReportsTheSentinelPidAndTheArtifactShape)
+TEST(InProcModulesInfoTest, ReportsTheSentinelPidForAModuleWithNoProcess)
 {
     // Straight at the registry: the container's own pid reporting is covered
     // above, and what this pins is the SNAPSHOT — the shape
@@ -461,4 +461,12 @@ TEST(InProcModulesInfoTest, ReportsTheSentinelPidAndTheArtifactShape)
     EXPECT_TRUE(after.value("loaded", false));
     ASSERT_TRUE(after.at("pid").is_number());
     EXPECT_EQ(after.at("pid").get<int64_t>(), -1);
+
+    // `format` is the snapshot's other new field, and it is stamped at
+    // DISCOVERY (processBareModuleInternal) — which registerModule, the direct
+    // graph mutator used here, does not go through. So it reads as the
+    // Qt-plugin default even for a `_bare` path, and the entry always carries
+    // the key: a consumer reading it never has to handle its absence.
+    ASSERT_TRUE(after.contains("format"));
+    EXPECT_EQ(after.at("format").get<std::string>(), std::string());
 }
