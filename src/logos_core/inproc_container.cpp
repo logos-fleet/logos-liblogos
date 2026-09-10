@@ -9,6 +9,7 @@
 #include <QString>
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <filesystem>
 #include <utility>
 
@@ -88,12 +89,27 @@ bool InProcContainer::launch(const ModuleDescriptor& desc,
     // A failure here is a LOAD ERROR the caller reports, not a crash. That is
     // the whole reason openBareModule takes an error string rather than
     // trusting dlopen's diagnostics to reach anybody.
+    // TIMED, and reported at info. On a phone the cost of bringing a Bundled
+    // module up IS this call -- dyld mapping the image, binding every `lp_*`
+    // the module left undefined against the host, and running its
+    // initialisers -- and it is the one number that scales with how many
+    // modules the Bundled set carries. Nothing else in the load path is
+    // per-image in the same way. Measuring around openBareModule rather than
+    // inside it keeps the symbol resolution in the number: an image that maps
+    // instantly and then binds 200 symbols is not fast.
     BareModuleAbi abi;
     std::string error;
-    if (!openBareModule(desc.path, abi, &error)) {
-        spdlog::error("Failed to load in-process module {}: {}", desc.name, error);
+    const auto dlopenStart = std::chrono::steady_clock::now();
+    const bool opened = openBareModule(desc.path, abi, &error);
+    const auto dlopenMs = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - dlopenStart).count();
+    if (!opened) {
+        spdlog::error("Failed to load in-process module {} after {:.1f} ms: {}",
+                      desc.name, dlopenMs, error);
         return false;
     }
+    spdlog::info("Bare module image {} opened in {:.1f} ms ({})",
+                 desc.name, dlopenMs, desc.path);
 
     // ── the runtime protocol handshake ────────────────────────────────────
     // A Bare module carries no Qt plugin metadata, so the build-time stamp the

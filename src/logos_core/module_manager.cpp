@@ -1317,6 +1317,18 @@ namespace ModuleManager {
         return result;
     }
 
+    char* addEmbeddedBareModuleCStr(const char* metadataJson, const char* imagePath) {
+        std::string moduleName =
+            registryInstance().addEmbeddedBareModule(std::string(metadataJson),
+                                                     std::string(imagePath));
+        if (moduleName.empty())
+            return nullptr;
+
+        char* result = new char[moduleName.size() + 1];
+        strcpy(result, moduleName.c_str());
+        return result;
+    }
+
     bool loadModule(const char* moduleName) {
         // BEFORE the lock guard, so it is destroyed after it. See rule 1.
         logos::ScopedModuleStateFlush stateFlusher;
