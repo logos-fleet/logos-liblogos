@@ -138,6 +138,12 @@ private:
     static void emitTrampoline(const char* eventName, const char* dataJson, void* userData);
     void onModuleEvent(const QString& eventName, const QVariantList& data);
 
+    // The provider's listener, taken as a COPY under m_eventMutex. Copied
+    // rather than invoked under the lock: the listener runs transport code and
+    // may re-enter this glue, and it is read from the worker thread while
+    // registration writes it from another.
+    EventCallback eventListener() const;
+
     // The dispatch itself: marshal args, push the caller, call the module,
     // classify the result by the contract. Runs on the delivering thread when
     // synchronous and on the worker thread when deferred — it touches nothing
@@ -145,7 +151,6 @@ private:
     QVariant dispatchOnThisThread(const QString& methodName,
                                   const QVariantList& args,
                                   const std::string& callerJson);
-
 
     // Read once from logos_module_get_methods(): the two return shapes the
     // generated glue would have known at compile time.

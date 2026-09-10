@@ -210,11 +210,7 @@ QVariant BareModuleGlue::callMethod(const QString& methodName, const QVariantLis
         m_workerContext,
         [this, methodName, args, callerJson, callId]() {
             const QVariant value = dispatchOnThisThread(methodName, args, callerJson);
-            EventCallback cb;
-            {
-                std::lock_guard<std::mutex> lock(m_eventMutex);
-                cb = m_eventCallback;
-            }
+            const EventCallback cb = eventListener();
             if (cb)
                 cb(logos::callCompleteEvent(), QVariantList{ callId, value });
             else
@@ -307,6 +303,12 @@ void BareModuleGlue::setEventListener(EventCallback callback)
     LogosProviderBase::setEventListener(std::move(callback));
 }
 
+BareModuleGlue::EventCallback BareModuleGlue::eventListener() const
+{
+    std::lock_guard<std::mutex> lock(m_eventMutex);
+    return m_eventCallback;
+}
+
 void BareModuleGlue::emitTrampoline(const char* eventName, const char* dataJson, void* userData)
 {
     auto* self = static_cast<BareModuleGlue*>(userData);
@@ -323,11 +325,7 @@ void BareModuleGlue::emitTrampoline(const char* eventName, const char* dataJson,
 
 void BareModuleGlue::onModuleEvent(const QString& eventName, const QVariantList& data)
 {
-    EventCallback cb;
-    {
-        std::lock_guard<std::mutex> lock(m_eventMutex);
-        cb = m_eventCallback;
-    }
+    const EventCallback cb = eventListener();
     if (!cb) {
         spdlog::debug("Bare module {} emitted '{}' with no listener attached",
                       m_name, eventName.toStdString());

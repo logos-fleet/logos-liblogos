@@ -33,11 +33,13 @@
 #include <QStringList>
 #include <QVariantMap>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -512,6 +514,48 @@ void ensureQtApp()
     (void)app;
 }
 
+// The rendezvous both deferred-dispatch tests need: a completion is delivered
+// on the glue's worker thread and asserted on the test's, so every observation
+// has to cross a lock and the test has to be able to WAIT for one rather than
+// sample for it. Which thread delivered is recorded too — that a completion did
+// not arrive on the delivering thread is one of the properties under test.
+class CompletionCollector {
+public:
+    auto listener()
+    {
+        return [this](const QString& name, const QVariantList& data) {
+            if (name != logos::callCompleteEvent() || data.size() != 2)
+                return;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_ids << data.at(0).toString();
+                m_values << data.at(1);
+                m_threads.push_back(std::this_thread::get_id());
+            }
+            m_cv.notify_all();
+        };
+    }
+
+    // False on timeout, so a caller can ASSERT_TRUE it and say what was missed.
+    bool waitFor(int count, std::chrono::seconds timeout = std::chrono::seconds(10))
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_cv.wait_for(lock, timeout, [&] { return m_ids.size() >= count; });
+    }
+
+    // Snapshots, all taken under the lock the listener writes under.
+    QStringList ids() const { std::lock_guard<std::mutex> lock(m_mutex); return m_ids; }
+    QVariant value(int i) const { std::lock_guard<std::mutex> lock(m_mutex); return m_values.at(i); }
+    std::thread::id thread(int i) const { std::lock_guard<std::mutex> lock(m_mutex); return m_threads.at(i); }
+
+private:
+    mutable std::mutex m_mutex;
+    std::condition_variable m_cv;
+    QStringList m_ids;
+    QVariantList m_values;
+    std::vector<std::thread::id> m_threads;
+};
+
 } // namespace
 
 TEST(TwoBareModulesTest, IdenticalSymbolsResolveToDifferentImages)
@@ -582,23 +626,8 @@ TEST(TwoBareModulesTest, EachModuleKeepsItsOwnState)
 
 TEST_F(BareModuleGlueTest, ADeferredDispatchAnswersTheSentinelAndCompletesLater)
 {
-    std::mutex mutex;
-    std::condition_variable cv;
-    QString completedId;
-    QVariant completedValue;
-    std::thread::id completionThread;
-
-    m_glue->setEventListener([&](const QString& name, const QVariantList& data) {
-        if (name != logos::callCompleteEvent() || data.size() != 2)
-            return;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            completedId = data.at(0).toString();
-            completedValue = data.at(1);
-            completionThread = std::this_thread::get_id();
-        }
-        cv.notify_all();
-    });
+    CompletionCollector completions;
+    m_glue->setEventListener(completions.listener());
 
     ensureQtApp();
     m_glue->enableDeferredDispatch();
@@ -614,13 +643,11 @@ TEST_F(BareModuleGlueTest, ADeferredDispatchAnswersTheSentinelAndCompletesLater)
         << "a published in-process module must answer the sentinel, not the result";
     EXPECT_FALSE(callId.isEmpty());
 
-    std::unique_lock<std::mutex> lock(mutex);
-    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(10),
-                            [&] { return !completedId.isEmpty(); }))
+    ASSERT_TRUE(completions.waitFor(1))
         << "no completion event arrived for the deferred dispatch";
-    EXPECT_EQ(completedId, callId);
-    EXPECT_EQ(completedValue.toLongLong(), 5);
-    EXPECT_NE(completionThread, std::this_thread::get_id())
+    EXPECT_EQ(completions.ids().at(0), callId);
+    EXPECT_EQ(completions.value(0).toLongLong(), 5);
+    EXPECT_NE(completions.thread(0), std::this_thread::get_id())
         << "the handler ran on the delivering thread after all";
 }
 
@@ -630,21 +657,8 @@ TEST_F(BareModuleGlueTest, DeferredDispatchesRunOneAtATimeInOrder)
     // One worker with one event loop is what keeps that true whatever the
     // module's declared concurrency, and the fixture's counter is what shows it:
     // ten increments through a shared global land as ten, in order.
-    std::mutex mutex;
-    std::condition_variable cv;
-    int completions = 0;
-    QStringList order;
-
-    m_glue->setEventListener([&](const QString& name, const QVariantList& data) {
-        if (name != logos::callCompleteEvent() || data.size() != 2)
-            return;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            order << data.at(0).toString();
-            ++completions;
-        }
-        cv.notify_all();
-    });
+    CompletionCollector completions;
+    m_glue->setEventListener(completions.listener());
 
     ensureQtApp();
     m_glue->enableDeferredDispatch();
@@ -657,20 +671,17 @@ TEST_F(BareModuleGlueTest, DeferredDispatchesRunOneAtATimeInOrder)
         issued << callId;
     }
 
-    std::unique_lock<std::mutex> lock(mutex);
-    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(10),
-                            [&] { return completions == 10; }));
-    EXPECT_EQ(order, issued) << "completions did not arrive in the order the calls were made";
-    lock.unlock();
+    ASSERT_TRUE(completions.waitFor(10));
+    EXPECT_EQ(completions.ids(), issued)
+        << "completions did not arrive in the order the calls were made";
 
-    // Ten serialized increments, not "somewhere between one and ten".
+    // Ten serialized increments, not "somewhere between one and ten": the read
+    // queues behind them and completes, so all eleven dispatches ran.
     QString finalId;
     const QVariant pending = m_glue->callMethod(QStringLiteral("total"), {});
     ASSERT_TRUE(logos::isPendingCallSentinel(pending, &finalId));
-    lock.lock();
-    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(10),
-                            [&] { return completions == 11; }));
-    EXPECT_EQ(order.size(), 11);
+    ASSERT_TRUE(completions.waitFor(11));
+    EXPECT_EQ(completions.ids().size(), 11);
 }
 
 TEST_F(BareModuleGlueTest, AnUnpublishedGlueStillAnswersInline)
