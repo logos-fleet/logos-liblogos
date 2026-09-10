@@ -1,11 +1,15 @@
 #include "bare_module_glue.h"
 
+#include <logos_async_dispatch.h>
 #include <logos_json_convert.h>
 #include <logos_types.h>
 
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QMetaObject>
+#include <QThread>
+#include <QVariantMap>
 #include <spdlog/spdlog.h>
 
 #include <chrono>
@@ -23,6 +27,11 @@ namespace {
 // contract's own words rather than a C++ or Qt spelling.
 constexpr const char* kVoidReturn   = "void";
 constexpr const char* kResultReturn = "result";
+
+// What the destructor waits for a worker it should never have to wait for: the
+// container stops the thread explicitly and refuses to destroy the glue if that
+// fails, so this is the belt to that braces.
+constexpr int kDestructorGraceMs = 2000;
 
 // Free a char* the module heap-allocated, through the module's OWN free — never
 // this image's. Two images, two allocators; logos_module_impl.h makes the
@@ -60,11 +69,71 @@ BareModuleGlue::BareModuleGlue(std::string moduleName, std::string moduleVersion
 
 BareModuleGlue::~BareModuleGlue()
 {
+    // The worker first: it is the one thing that can still be INSIDE the module
+    // when this runs, and it reaches back through m_eventCallback on the way
+    // out. Clearing the emit callback with a dispatch in flight would leave the
+    // completion with nowhere to go.
+    //
+    // The container calls stopDispatch() itself and refuses to destroy a glue
+    // whose worker did not stop, so reaching here with one running means some
+    // other owner skipped that step. Say so and wait anyway — a short wait is
+    // still better than returning into a `delete this` the worker is about to
+    // dereference.
+    if (!stopDispatch(kDestructorGraceMs))
+        spdlog::critical("Bare module {} is being destroyed with a dispatch still "
+                         "inside its image", m_name);
+
     // Clear before the image is closed. logos_module_impl.h: after the clearing
     // call returns, the module must not invoke the old callback — which is what
     // makes this the last moment `this` is reachable from module code.
     if (m_abi.setEmitCallback)
         m_abi.setEmitCallback(nullptr, nullptr);
+}
+
+void BareModuleGlue::enableDeferredDispatch()
+{
+    if (m_deferred.load())
+        return;
+
+    // A plain QThread, whose default run() is exec(): the worker needs a Qt
+    // event dispatcher of its own, because a handler that calls another module
+    // spins nested QEventLoops to acquire the replica and await the reply. A
+    // std::thread cannot pump those and such a call would hang — the same
+    // reason the generated `multi` glue insists on QThread::create.
+    m_workerThread = new QThread();
+    m_workerThread->setObjectName(QString::fromStdString("logos-inproc-" + m_name));
+    m_workerContext = new QObject();
+    m_workerContext->moveToThread(m_workerThread);
+    m_workerThread->start();
+    m_deferred.store(true);
+}
+
+bool BareModuleGlue::stopDispatch(int graceMs)
+{
+    if (!m_workerThread)
+        return true;
+
+    // Deferral off BEFORE the loop is asked to stop, so a call delivered during
+    // teardown runs inline rather than being queued onto a thread that will
+    // never run it again.
+    m_deferred.store(false);
+
+    m_workerThread->quit();
+    if (!m_workerThread->wait(graceMs)) {
+        // Bounded on purpose. The thread this runs on is the one a blocked
+        // handler is waiting for, so an unbounded wait here turns one stuck
+        // module into a hung host. Everything stays alive and is reported to
+        // the caller, which is the only party that can decide what to abandon.
+        spdlog::error("Bare module {} did not leave its image within {}ms; "
+                      "its dispatch thread is still running", m_name, graceMs);
+        return false;
+    }
+
+    delete m_workerContext;
+    m_workerContext = nullptr;
+    delete m_workerThread;
+    m_workerThread = nullptr;
+    return true;
 }
 
 void BareModuleGlue::readContract()
@@ -123,9 +192,47 @@ QVariant BareModuleGlue::callMethod(const QString& methodName, const QVariantLis
     // delivering thread. Unlike the generated glue this runs in the SAME image
     // as ModuleProxy, so the thread-local it reads is the one CallerScope wrote
     // — the invokeMethod indirection the generated glue needs has nothing to
-    // cross here.
+    // cross here. A worker has no scope and never will, so a pull made there
+    // would answer Unknown for every caller.
     const std::string callerJson = currentCallerJson();
 
+    if (!m_deferred.load())
+        return dispatchOnThisThread(methodName, args, callerJson);
+
+    // Deferred: hand the dispatch to the worker and answer the pending-call
+    // sentinel. The consumer transport keys on `callId` and waits for the
+    // completion event below; see the threading note in the header for why the
+    // delivering thread must be released rather than blocked.
+    const QString callId = QStringLiteral("bc-%1").arg(
+        static_cast<qulonglong>(m_callCounter.fetch_add(1, std::memory_order_relaxed)));
+
+    QMetaObject::invokeMethod(
+        m_workerContext,
+        [this, methodName, args, callerJson, callId]() {
+            const QVariant value = dispatchOnThisThread(methodName, args, callerJson);
+            EventCallback cb;
+            {
+                std::lock_guard<std::mutex> lock(m_eventMutex);
+                cb = m_eventCallback;
+            }
+            if (cb)
+                cb(logos::callCompleteEvent(), QVariantList{ callId, value });
+            else
+                spdlog::warn("Bare module {}: dispatch of '{}' completed with no event "
+                             "listener attached; the caller will time out",
+                             m_name, methodName.toStdString());
+        },
+        Qt::QueuedConnection);
+
+    QVariantMap pending;
+    pending[logos::pendingCallKey()] = callId;
+    return pending;
+}
+
+QVariant BareModuleGlue::dispatchOnThisThread(const QString& methodName,
+                                              const QVariantList& args,
+                                              const std::string& callerJson)
+{
     nlohmann::json jArgs = nlohmann::json::array();
     for (const QVariant& a : args)
         jArgs.push_back(logos::qvariantToNlohmann(a));
@@ -193,7 +300,10 @@ bool BareModuleGlue::informModuleToken(const QString& moduleName, const QString&
 
 void BareModuleGlue::setEventListener(EventCallback callback)
 {
-    m_eventCallback = callback;
+    {
+        std::lock_guard<std::mutex> lock(m_eventMutex);
+        m_eventCallback = callback;
+    }
     LogosProviderBase::setEventListener(std::move(callback));
 }
 
@@ -213,12 +323,17 @@ void BareModuleGlue::emitTrampoline(const char* eventName, const char* dataJson,
 
 void BareModuleGlue::onModuleEvent(const QString& eventName, const QVariantList& data)
 {
-    if (!m_eventCallback) {
+    EventCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(m_eventMutex);
+        cb = m_eventCallback;
+    }
+    if (!cb) {
         spdlog::debug("Bare module {} emitted '{}' with no listener attached",
                       m_name, eventName.toStdString());
         return;
     }
-    m_eventCallback(eventName, data);
+    cb(eventName, data);
 }
 
 void BareModuleGlue::onInit(LogosAPI* api)

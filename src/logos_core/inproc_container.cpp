@@ -132,24 +132,29 @@ bool InProcContainer::launch(const ModuleDescriptor& desc,
     // it is what makes an inbound call to this module authorize AS this module
     // rather than as the host.
     //
-    // ITS OUTBOUND HALF IS NOT ISOLATED YET, and the limit is exact rather than
-    // vague. A Bare module's `lp_*` resolve into THIS image's logos-protocol,
-    // and every lp_token_* entry point reads and writes
-    // TokenManager::instance() — the host's ambient ring — not
-    // forIdentity(name). So a Bare module that CALLS another module presents
-    // whatever the ambient ring holds, which is the host's own credentials.
+    // THE OUTBOUND HALF IS ISOLATED TOO, and it costs nothing here because it
+    // was already paid for. An earlier version of this comment said it was not,
+    // reasoning that a Bare module's `lp_*` resolve into THIS image and that
+    // every lp_token_* entry point reads TokenManager::instance(). The second
+    // half is true and the first does not follow: a dependent module's outbound
+    // calls do not go through lp_token_get at all, they go through
+    // lp_client_create(target, ORIGIN), and that function resolves its store
+    // with TokenManager::forIdentity(origin) — the very store isolateIdentity
+    // below creates. The generated umbrella bakes the module's own name in as
+    // that origin (logos-cpp-sdk makeUmbrellaHeaderFromDeps), so a Bare module
+    // cannot name another identity as its origin without being rebuilt as one.
     //
-    // A leaf module (the counter, and every module in the Bundled set that
-    // depends on nothing) references no lp_invoke at all and is unaffected: the
-    // Bare gate in logos-module-builder shows lp_invoke UNDEFINED only for a
-    // module with dependencies. Making lp_* identity-aware so a DEPENDENT Bare
-    // module presents its own credential is slice 17 (two Bare modules in one
-    // process), and it is spelled out here so the limit is read rather than
-    // rediscovered.
+    // Measured, with capability_module, a relay and its two targets all running
+    // as Bare modules in one process: the relay's first call to each target
+    // logged "No token found", ran exactly ONE requestModule, and every later
+    // call to that target hit the cached token — no re-exchange. Had the client
+    // been reading the ambient ring, the target's own auth token would have
+    // been sitting there (the core writes one per loaded module) and no
+    // requestModule would ever have been logged.
     //
-    // What is NOT deferred is the inbound half, which is what this admission
-    // buys today: a call INTO this module authorizes against the module's own
-    // store, so it is authorized as this module and not as the host.
+    // So both directions authorize as the MODULE: a call in is checked against
+    // this module's own store, and a call out presents what this module's own
+    // store holds.
     if (m_hostApi) {
         const QString qname = QString::fromStdString(desc.name);
         // ISOLATE ONLY — NOT admitConsumer, and the difference is the whole of
@@ -218,6 +223,18 @@ bool InProcContainer::launch(const ModuleDescriptor& desc,
         // init() hands the provider its LogosAPI, the same hand-off the
         // subprocess initializer performs through registerObject.
         instance->glue->init(instance->api);
+
+        // PUBLISHED, THEREFORE DEFERRED — and only now, because deferral is a
+        // promise to answer over the event channel and the channel is what
+        // registerObject just gave this glue.
+        //
+        // From here the module's handlers run on its own thread and callMethod
+        // answers the pending-call sentinel. That is what makes an in-process
+        // module that CALLS another one terminate: the delivering thread here
+        // is the host's Qt main thread, which is also the thread every reply
+        // this module is waiting for has to arrive on. See the threading note
+        // in bare_module_glue.h.
+        instance->glue->enableDeferredDispatch();
     } else {
         spdlog::debug("In-process module {} loaded without a host API; not published", desc.name);
     }
@@ -318,9 +335,35 @@ void InProcContainer::terminate(const std::string& name)
         onTerminated = instance->onTerminated;
     }
 
-    // Ask, then unpublish, then close — in that order, because each step
-    // removes a way back into the next one's memory.
+    // Ask, then stop, then unpublish, then close — in that order, because each
+    // step removes a way back into the next one's memory.
     instance->glue->aboutToUnload(kUnloadGraceMs);
+
+    // The dispatch thread has to be off before anything else is taken away: it
+    // is the one thread that can still be inside the module, and it reaches
+    // back through the provider on its way out.
+    if (!instance->glue->stopDispatch(kUnloadGraceMs)) {
+        // ABANDONED, not destroyed. The worker is executing code in the image
+        // and holds a pointer to the glue, so freeing either is a use-after-free
+        // and dlclose is an unmap of running code. The module is out of the
+        // container's map (it is already erased above), so a reload gets a fresh
+        // image; what stays behind is one leaked instance, which is the only
+        // outcome here that is not a crash.
+        //
+        // Reachable when a handler is waiting on an outbound reply, because that
+        // reply is serviced on the very thread running this teardown.
+        spdlog::error("Abandoning in-process module {}: a dispatch is still inside "
+                      "its image after {}ms. Its image stays mapped and its glue "
+                      "stays alive for the life of this process.",
+                      name, kUnloadGraceMs);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_abandoned.push_back(std::move(instance));
+        }
+        if (onTerminated)
+            onTerminated(name);
+        return;
+    }
 
     if (instance->api) {
         // Deleting the LogosAPI destroys its provider, and ~LogosAPIProvider

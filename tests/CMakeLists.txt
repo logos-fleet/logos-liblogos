@@ -153,6 +153,27 @@ target_include_directories(bare_fixture_module PRIVATE
     ${LOGOS_PROTOCOL_ROOT}/include
     ${LOGOS_PROTOCOL_ROOT}/include/cpp
 )
-add_dependencies(logos_core_tests bare_fixture_module)
+# THE TWIN: the same sources, a second image.
+#
+# Two Bare modules in one process export the SAME module-impl C ABI symbol names
+# by construction — that is what the ABI is — so "each handle reaches its own
+# image" is a property of how the container opens them (RTLD_LOCAL) and cannot
+# be asserted with one library. Building the fixture twice is the only way to
+# produce the collision on purpose: identical symbols, distinct images, distinct
+# module-global state.
+add_library(bare_fixture_twin MODULE fixtures/bare_fixture_module.cpp)
+set_target_properties(bare_fixture_twin PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "bare_twin_bare"
+)
+if(APPLE)
+    set_target_properties(bare_fixture_twin PROPERTIES SUFFIX ".dylib")
+endif()
+target_include_directories(bare_fixture_twin PRIVATE
+    ${LOGOS_PROTOCOL_ROOT}/include
+    ${LOGOS_PROTOCOL_ROOT}/include/cpp
+)
+
+add_dependencies(logos_core_tests bare_fixture_module bare_fixture_twin)
 
 gtest_discover_tests(logos_core_tests DISCOVERY_MODE PRE_TEST)
