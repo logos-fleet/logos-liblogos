@@ -22,15 +22,24 @@
 #include "composite_module_loader.h"
 #include "module_registry.h"
 
+#include <logos_async_dispatch.h>
 #include <logos_protocol.h>
 #include <logos_types.h>
+#include <token_manager.h>
 
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QStringList>
 #include <QVariantMap>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -469,4 +478,282 @@ TEST(InProcModulesInfoTest, ReportsTheSentinelPidForAModuleWithNoProcess)
     // the key: a consumer reading it never has to handle its absence.
     ASSERT_TRUE(after.contains("format"));
     EXPECT_EQ(after.at("format").get<std::string>(), std::string());
+}
+
+// ── two Bare modules in one process ─────────────────────────────────────────
+//
+// TEST_BARE_MODULE_TWIN is the SAME fixture sources built a second time: every
+// module-impl C ABI symbol has the same name in both images, which is not an
+// accident of the fixture but what the ABI requires of every Bare module. The
+// container opens them RTLD_LOCAL for exactly this reason, and these are the
+// tests that say so.
+
+namespace {
+
+std::string twinModulePath()
+{
+    const char* p = std::getenv("TEST_BARE_MODULE_TWIN");
+    return p ? p : std::string();
+}
+
+// The deferred-dispatch tests need a Qt event loop on the worker thread, and
+// QThread::exec() refuses to run one without a QCoreApplication ("QEventLoop:
+// Cannot be used without QCoreApplication"). Every real host of this container
+// has one long before a module loads; this suite has none because nothing else
+// in it needs one. Built once, on the main thread, and deliberately never
+// destroyed — the tests that follow are the only users and the process is about
+// to end.
+void ensureQtApp()
+{
+    if (QCoreApplication::instance())
+        return;
+    static int argc = 1;
+    static char arg0[] = "logos_core_tests";
+    static char* argv[] = {arg0, nullptr};
+    static QCoreApplication* app = new QCoreApplication(argc, argv);
+    (void)app;
+}
+
+// The rendezvous both deferred-dispatch tests need: a completion is delivered
+// on the glue's worker thread and asserted on the test's, so every observation
+// has to cross a lock and the test has to be able to WAIT for one rather than
+// sample for it. Which thread delivered is recorded too — that a completion did
+// not arrive on the delivering thread is one of the properties under test.
+class CompletionCollector {
+public:
+    auto listener()
+    {
+        return [this](const QString& name, const QVariantList& data) {
+            if (name != logos::callCompleteEvent() || data.size() != 2)
+                return;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_ids << data.at(0).toString();
+                m_values << data.at(1);
+                m_threads.push_back(std::this_thread::get_id());
+            }
+            m_cv.notify_all();
+        };
+    }
+
+    // False on timeout, so a caller can ASSERT_TRUE it and say what was missed.
+    bool waitFor(int count, std::chrono::seconds timeout = std::chrono::seconds(10))
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_cv.wait_for(lock, timeout, [&] { return m_ids.size() >= count; });
+    }
+
+    // Snapshots, all taken under the lock the listener writes under.
+    QStringList ids() const { std::lock_guard<std::mutex> lock(m_mutex); return m_ids; }
+    QVariant value(int i) const { std::lock_guard<std::mutex> lock(m_mutex); return m_values.at(i); }
+    std::thread::id thread(int i) const { std::lock_guard<std::mutex> lock(m_mutex); return m_threads.at(i); }
+
+private:
+    mutable std::mutex m_mutex;
+    std::condition_variable m_cv;
+    QStringList m_ids;
+    QVariantList m_values;
+    std::vector<std::thread::id> m_threads;
+};
+
+} // namespace
+
+TEST(TwoBareModulesTest, IdenticalSymbolsResolveToDifferentImages)
+{
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    ASSERT_FALSE(twinModulePath().empty()) << "TEST_BARE_MODULE_TWIN is not set";
+    ASSERT_NE(bareModulePath(), twinModulePath());
+
+    LogosCore::BareModuleAbi first;
+    LogosCore::BareModuleAbi second;
+    std::string error;
+    ASSERT_TRUE(LogosCore::openBareModule(bareModulePath(), first, &error)) << error;
+    ASSERT_TRUE(LogosCore::openBareModule(twinModulePath(), second, &error)) << error;
+
+    EXPECT_NE(first.handle, second.handle);
+    // The property that matters. Both images export `logos_module_dispatch`;
+    // under RTLD_GLOBAL the second dlopen would leave the first definition in
+    // the process namespace and BOTH handles would resolve to one image, which
+    // is silent — every call would land in whichever module was loaded first
+    // and answer plausibly.
+    EXPECT_NE(reinterpret_cast<void*>(first.dispatch),
+              reinterpret_cast<void*>(second.dispatch))
+        << "both handles resolved logos_module_dispatch to the same address: the "
+           "images are sharing one definition";
+
+    LogosCore::closeBareModule(first);
+    LogosCore::closeBareModule(second);
+}
+
+TEST(TwoBareModulesTest, EachModuleKeepsItsOwnState)
+{
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    ASSERT_FALSE(twinModulePath().empty()) << "TEST_BARE_MODULE_TWIN is not set";
+
+    LogosCore::InProcContainer container;
+    LogosCore::LoadedModuleHandle handle;
+
+    LogosCore::ModuleDescriptor a = bareDescriptor("bare_a");
+    LogosCore::ModuleDescriptor b = bareDescriptor("bare_b");
+    b.path = twinModulePath();
+
+    ASSERT_TRUE(container.launch(a, "", {}, nullptr, handle));
+    ASSERT_TRUE(container.launch(b, "", {}, nullptr, handle));
+
+    // Drive each through its own glue: the fixture's counter is a module global,
+    // so a shared image shows up as one counter answering for both names.
+    LogosCore::BareModuleAbi abiA;
+    LogosCore::BareModuleAbi abiB;
+    std::string error;
+    ASSERT_TRUE(LogosCore::openBareModule(bareModulePath(), abiA, &error)) << error;
+    ASSERT_TRUE(LogosCore::openBareModule(twinModulePath(), abiB, &error)) << error;
+
+    LogosCore::BareModuleGlue glueA("bare_a", "1.0.0", abiA);
+    LogosCore::BareModuleGlue glueB("bare_b", "1.0.0", abiB);
+
+    glueA.callMethod(QStringLiteral("bump"), QVariantList{5});
+    glueB.callMethod(QStringLiteral("bump"), QVariantList{100});
+
+    EXPECT_EQ(glueA.callMethod(QStringLiteral("total"), {}).toLongLong(), 5);
+    EXPECT_EQ(glueB.callMethod(QStringLiteral("total"), {}).toLongLong(), 100);
+
+    container.terminateAll();
+    LogosCore::closeBareModule(abiA);
+    LogosCore::closeBareModule(abiB);
+}
+
+// ── the dispatch leaves the delivering thread ───────────────────────────────
+
+TEST_F(BareModuleGlueTest, ADeferredDispatchAnswersTheSentinelAndCompletesLater)
+{
+    CompletionCollector completions;
+    m_glue->setEventListener(completions.listener());
+
+    ensureQtApp();
+    m_glue->enableDeferredDispatch();
+
+    const QVariant answer = m_glue->callMethod(QStringLiteral("add"), QVariantList{2, 3});
+
+    // NOT the result: the pending-call sentinel. This is the whole point — the
+    // delivering thread is released rather than blocked, because in the Native
+    // container it is the host's own Qt main thread and every reply the module
+    // may be waiting for has to arrive on it.
+    QString callId;
+    ASSERT_TRUE(logos::isPendingCallSentinel(answer, &callId))
+        << "a published in-process module must answer the sentinel, not the result";
+    EXPECT_FALSE(callId.isEmpty());
+
+    ASSERT_TRUE(completions.waitFor(1))
+        << "no completion event arrived for the deferred dispatch";
+    EXPECT_EQ(completions.ids().at(0), callId);
+    EXPECT_EQ(completions.value(0).toLongLong(), 5);
+    EXPECT_NE(completions.thread(0), std::this_thread::get_id())
+        << "the handler ran on the delivering thread after all";
+}
+
+TEST_F(BareModuleGlueTest, DeferredDispatchesRunOneAtATimeInOrder)
+{
+    // logos_module_impl.h: "the host serializes dispatch calls (one at a time)".
+    // One worker with one event loop is what keeps that true whatever the
+    // module's declared concurrency, and the fixture's counter is what shows it:
+    // ten increments through a shared global land as ten, in order.
+    CompletionCollector completions;
+    m_glue->setEventListener(completions.listener());
+
+    ensureQtApp();
+    m_glue->enableDeferredDispatch();
+
+    QStringList issued;
+    for (int i = 0; i < 10; ++i) {
+        QString callId;
+        const QVariant answer = m_glue->callMethod(QStringLiteral("bump"), QVariantList{1});
+        ASSERT_TRUE(logos::isPendingCallSentinel(answer, &callId));
+        issued << callId;
+    }
+
+    ASSERT_TRUE(completions.waitFor(10));
+    EXPECT_EQ(completions.ids(), issued)
+        << "completions did not arrive in the order the calls were made";
+
+    // Ten serialized increments, not "somewhere between one and ten": the read
+    // queues behind them and completes, so all eleven dispatches ran.
+    QString finalId;
+    const QVariant pending = m_glue->callMethod(QStringLiteral("total"), {});
+    ASSERT_TRUE(logos::isPendingCallSentinel(pending, &finalId));
+    ASSERT_TRUE(completions.waitFor(11));
+    EXPECT_EQ(completions.ids().size(), 11);
+}
+
+TEST_F(BareModuleGlueTest, AnUnpublishedGlueStillAnswersInline)
+{
+    // Deferral is a promise to deliver over the event channel, and a glue the
+    // container never published has none. It must therefore keep answering the
+    // real value — which is also what every other test in this file relies on.
+    const QVariant sum = m_glue->callMethod(QStringLiteral("add"), QVariantList{4, 4});
+    QString ignored;
+    EXPECT_FALSE(logos::isPendingCallSentinel(sum, &ignored));
+    EXPECT_EQ(sum.toLongLong(), 8);
+}
+
+TEST(InProcContainerTest, TerminateStopsTheDispatchThreadBeforeClosingTheImage)
+{
+    // The reload is the assertion, as it is for the image itself: a container
+    // that closed the image with its worker still inside it would crash here
+    // rather than fail.
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    LogosCore::InProcContainer container;
+    LogosCore::LoadedModuleHandle handle;
+
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(container.launch(bareDescriptor(), "", {}, nullptr, handle)) << "round " << i;
+        container.terminate("bare_fixture");
+        EXPECT_FALSE(container.hasModule("bare_fixture"));
+    }
+}
+
+// ── the identity boundary between two in-process modules ────────────────────
+
+TEST(TwoBareModulesTest, AnIdentityCannotPresentACredentialIssuedToAnother)
+{
+    // What the Native container buys per module, asserted at the seam it buys
+    // it from. InProcContainer::launch calls LogosAPI::forIdentity (which
+    // isolates) and sendToken calls TokenManager::adoptCredentialFor; the two
+    // together are the whole of a Bare module's identity, and this is the
+    // property they exist for: A's store answers A's credential and holds
+    // nothing that was issued to C.
+    //
+    // The REJECTION is ModuleProxy's, and it is constant-time there
+    // (logos-protocol's isAuthorized, covered by that repo's suite). What is
+    // asserted here is the half this repo owns — that a token issued to C is
+    // never in A's hand to present in the first place, so the comparison A can
+    // provoke is against a value it does not hold.
+    const QString a = QStringLiteral("bare_identity_a");
+    const QString c = QStringLiteral("bare_identity_c");
+    const QString target = QStringLiteral("bare_identity_target");
+
+    ASSERT_TRUE(TokenManager::isolateIdentity(a));
+    ASSERT_TRUE(TokenManager::isolateIdentity(c));
+    ASSERT_TRUE(TokenManager::isIsolated(a));
+    ASSERT_TRUE(TokenManager::isIsolated(c));
+
+    ASSERT_TRUE(TokenManager::adoptCredentialFor(a, QStringLiteral("credential-for-a")));
+    ASSERT_TRUE(TokenManager::adoptCredentialFor(c, QStringLiteral("credential-for-c")));
+
+    for (const QString& key : TokenManager::bootstrapKeys()) {
+        EXPECT_EQ(TokenManager::forIdentity(a).getToken(key), QStringLiteral("credential-for-a"));
+        EXPECT_EQ(TokenManager::forIdentity(c).getToken(key), QStringLiteral("credential-for-c"));
+    }
+
+    // The pair token capability_module mints for C, filed in C's store the way
+    // LogosAPIClient files it after a requestModule.
+    TokenManager::forIdentity(c).saveToken(target, QStringLiteral("pair-token-c-to-target"));
+
+    EXPECT_TRUE(TokenManager::forIdentity(a).getToken(target).isEmpty())
+        << "identity A can see the token issued to C";
+    EXPECT_FALSE(TokenManager::forIdentity(a).hasToken(target));
+
+    // And neither leaked into the ambient ring, which is the store every
+    // un-isolated caller in this image reads.
+    EXPECT_TRUE(TokenManager::instance().getToken(target).isEmpty())
+        << "an isolated identity's token reached the host's ambient ring";
 }

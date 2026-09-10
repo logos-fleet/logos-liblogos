@@ -298,9 +298,16 @@ namespace {
     // would turn `--container inproc` into "start a core with no
     // capability_module", i.e. a core in which every cross-module call is
     // refused, which is not what anyone asking for the Native container means.
-    // They ship as Qt plugins and become Bare when the Bundled-set build makes
-    // them so; until then the assertion governs the modules the OPERATOR chose
-    // to load, which is where it has something to assert.
+    //
+    // EXEMPT IS NOT THE SAME AS SUBPROCESS, and the difference is now live for
+    // capability_module: it has a Bare artifact (logos-capability-module builds
+    // a `bare` output), and where the modules directory supplies that artifact
+    // it loads into the Native container like any other Bare module — the
+    // ARTIFACT decides the container, and this exemption only decides whether a
+    // disagreement with the policy is fatal. What the exemption still buys is
+    // the case where the artifact on disk is the Qt plugin (logoscore's own
+    // bundle ships one): the core comes up with its trust root in a subprocess
+    // rather than not at all.
     const char* containerPolicyMismatch(const std::string& policy,
                                         const std::string& name,
                                         const std::string& format) {

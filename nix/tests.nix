@@ -82,7 +82,7 @@ pkgs.stdenv.mkDerivation {
     # carried in. Assert them rather than trust it: without a fixture its test
     # skips, and a skip renders as a pass -- the exact silent hole the fixtures
     # were added to close.
-    for _name in dep_range_fixture_plugin dep_malformed_fixture_plugin bare_fixture_bare; do
+    for _name in dep_range_fixture_plugin dep_malformed_fixture_plugin bare_fixture_bare bare_twin_bare; do
       _fixture=""
       for cand in $out/lib/$_name.so $out/lib/$_name.dylib; do
         [ -f "$cand" ] && _fixture="$cand"

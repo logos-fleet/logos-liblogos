@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class LogosAPI;
 
@@ -107,6 +108,13 @@ private:
     // different modules.
     mutable std::mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<Instance>> m_modules;
+
+    // Instances whose dispatch thread would not stop. Kept alive for the life of
+    // the process on purpose: the thread is still executing code in the image
+    // and still holds a pointer to the glue, so destroying either is a
+    // use-after-free and dlclose is an unmap of running code. See terminate().
+    std::vector<std::unique_ptr<Instance>> m_abandoned;
+
     LogosAPI* m_hostApi = nullptr;
 };
 

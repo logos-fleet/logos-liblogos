@@ -323,12 +323,17 @@
             # library exporting the module-impl C ABI and nothing else. Also
             # staged into the tests package by tests/CMakeLists.txt.
             export TEST_BARE_MODULE="${testsPkg}/lib/bare_fixture_bare.${pluginExt}"
+            # A SECOND image built from the same sources: same C ABI symbol
+            # names, its own module-global state. What "two Bare modules in one
+            # process" costs is exactly this collision, so the fixture is built
+            # twice rather than asserted about once.
+            export TEST_BARE_MODULE_TWIN="${testsPkg}/lib/bare_twin_bare.${pluginExt}"
             # A loadable image that is NOT a module — the container must report
             # it as a load error rather than crash on it. The test binary itself
             # is the most honest example in reach.
             export TEST_NON_MODULE_IMAGE="${testsPkg}/bin/logos_core_tests"
             export LOGOS_REQUIRE_TEST_FIXTURES=1
-            for f in "$TEST_PLUGIN_DEP_RANGE" "$TEST_PLUGIN_DEP_MALFORMED" "$TEST_REAL_HOST" "$TEST_BARE_MODULE"; do
+            for f in "$TEST_PLUGIN_DEP_RANGE" "$TEST_PLUGIN_DEP_MALFORMED" "$TEST_REAL_HOST" "$TEST_BARE_MODULE" "$TEST_BARE_MODULE_TWIN"; do
               if [ ! -f "$f" ]; then
                 echo "Error: constraint fixture not found at $f" >&2
                 exit 1
