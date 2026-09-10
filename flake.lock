@@ -3552,11 +3552,11 @@
         "nixpkgs-windows": "nixpkgs-windows_109"
       },
       "locked": {
-        "lastModified": 1786729772,
-        "narHash": "sha256-7qE/hchFHmaCxoFCI4dtCqv2eHyL6VttgedTas41Lgs=",
-        "owner": "logos-co",
+        "lastModified": 1789028200,
+        "narHash": "sha256-R0B5HkiMoMEiKGbAY9QuCsr49OgirtH6opnZCm3zYTo=",
+        "owner": "logos-fleet",
         "repo": "logos-nix",
-        "rev": "f55bf91b8a723ee5c27c39c773b034255538d280",
+        "rev": "9572de2f1835fddd5730d3a77139a643283cd98e",
         "type": "github"
       },
       "original": {

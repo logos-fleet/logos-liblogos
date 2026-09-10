@@ -2,6 +2,12 @@
   description = "Logos liblogos core library";
 
   inputs = {
+    # LOCKED TO THE logos-fleet FORK, not to this URL: the mobile chain below
+    # needs lib.mkMobileTargets / lib.mkForAllMobileTargets and the iOS
+    # third-party overlay, which live on the fork and are not upstream yet.
+    # `nix flake update logos-nix` would silently move it back to logos-co and
+    # the mobile outputs would stop evaluating -- re-pin with
+    #   nix flake lock --override-input logos-nix github:logos-fleet/logos-nix/<rev>
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
     logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk";
