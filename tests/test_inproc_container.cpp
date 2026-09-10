@@ -472,8 +472,8 @@ TEST(InProcModulesInfoTest, ReportsTheSentinelPidForAModuleWithNoProcess)
     EXPECT_EQ(after.at("pid").get<int64_t>(), -1);
 
     // `format` is the snapshot's other new field, and it is stamped at
-    // DISCOVERY (processBareModuleInternal) — which registerModule, the direct
-    // graph mutator used here, does not go through. So it reads as the
+    // DISCOVERY (processManifestModuleInternal) — which registerModule, the
+    // direct graph mutator used here, does not go through. So it reads as the
     // Qt-plugin default even for a `_bare` path, and the entry always carries
     // the key: a consumer reading it never has to handle its absence.
     ASSERT_TRUE(after.contains("format"));

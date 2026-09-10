@@ -2,6 +2,7 @@
 #include "module_state_observer.h"
 #include <spdlog/spdlog.h>
 #include <cassert>
+#include <cctype>
 #include <ctime>
 #include <deque>
 #include <mutex>
@@ -90,6 +91,25 @@ bool looksLikeBareModule(const std::string& mainFilePath) {
            std::string_view(stem).substr(stem.size() - kSuffix.size()) == kSuffix;
 }
 
+// Is `mainFilePath` a web module's entry document?
+//
+// By the EXTENSION, for the same reason looksLikeBareModule goes by the
+// filename: it is the only thing available without opening it, and a web
+// variant's `main` is a page. lgx's variant vocabulary already forbids a native
+// host resolving a `web` variant at all (platform_variant.cpp: "web has no
+// architecture half ... a host without a container would install JavaScript
+// where it loads a plugin"), so anything that reaches here named .html was put
+// there deliberately.
+//
+// A cheap GATE, not the proof: WebContainer opens the page and waits for it to
+// publish a module, which is what a document merely named like one runs into.
+bool looksLikeWebModule(const std::string& mainFilePath) {
+    std::string ext = std::filesystem::path(mainFilePath).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".html" || ext == ".htm";
+}
+
 }  // namespace
 
 void ModuleRegistry::setModulesDir(const std::string& dir) {
@@ -164,9 +184,13 @@ void ModuleRegistry::discoverInstalledModules() {
         // self-asserted name embedded in the plugin binary. processModuleInternal
         // refuses the plugin if its embedded metadata name disagrees, so a
         // package cannot register under a privileged name it doesn't own.
-        std::string moduleName = looksLikeBareModule(mod.mainFilePath)
-            ? processBareModuleInternal(mod)
-            : processModuleInternal(mod.mainFilePath, mod.name);
+        std::string moduleName;
+        if (looksLikeBareModule(mod.mainFilePath))
+            moduleName = processManifestModuleInternal(mod, "bare", "Bare module");
+        else if (looksLikeWebModule(mod.mainFilePath))
+            moduleName = processManifestModuleInternal(mod, "web", "web module");
+        else
+            moduleName = processModuleInternal(mod.mainFilePath, mod.name);
         if (moduleName.empty()) {
             spdlog::warn("Failed to process module: {}", mod.mainFilePath);
             continue;
@@ -370,24 +394,32 @@ std::string ModuleRegistry::processModuleInternal(const std::string& modulePath,
     return name;
 }
 
-std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pkg) {
-    // No embedded-name cross-check to make, and none to miss: a Bare module
-    // asserts no name of its own anywhere, so the manifest name is not merely
-    // the trusted one, it is the only one. The F-022 guard in
-    // processModuleInternal exists because a Qt plugin DOES assert a name; the
-    // property it protects (a module registers only under the name its package
-    // owns) holds here by construction.
+// The MANIFEST arm of the upsert, shared by every artifact that carries no
+// binary metadata of its own: a Bare module image and a web page alike.
+//
+// No embedded-name cross-check to make, and none to miss: neither shape asserts
+// a name of its own anywhere this host reads, so the manifest name is not merely
+// the trusted one, it is the only one. The F-022 guard in processModuleInternal
+// exists because a Qt plugin DOES assert a name; the property it protects (a
+// module registers only under the name its package owns) holds here by
+// construction.
+//
+// `format` is what ModuleInfo::format is stamped with; `label` is how that
+// format is named in this function's log lines.
+std::string ModuleRegistry::processManifestModuleInternal(const InstalledPackage& pkg,
+                                                          const std::string& format,
+                                                          const char* label) {
     const std::string& name = pkg.name;
     if (!logos::isValidModuleName(name)) {
-        spdlog::warn("Rejecting Bare module with invalid name '{}' from {}",
-                     name, pkg.mainFilePath);
+        spdlog::warn("Rejecting {} with invalid name '{}' from {}",
+                     label, name, pkg.mainFilePath);
         return {};
     }
 
     ModuleInfo& info = m_modules[name];
     info.path = pkg.mainFilePath;
     info.version = pkg.version;
-    info.format = "bare";
+    info.format = format;
     // Rebuilt from the manifest each scan, the same way the Qt arm rebuilds
     // from embedded metadata: the manifest IS this module's metadata.
     info.metadataJson = nlohmann::json{
@@ -397,7 +429,7 @@ std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pk
         {"author", pkg.author},
         {"type", pkg.type},
         {"category", pkg.category},
-        {"format", "bare"},
+        {"format", format},
         {"dependencies", pkg.dependencies},
     }.dump();
     // Both edge sets carry whatever the manifest declared. The package
@@ -432,7 +464,7 @@ std::string ModuleRegistry::processBareModuleInternal(const InstalledPackage& pk
     for (const auto& o : pkg.optionalDependencies)
         info.optionalDependencies.push_back(toGate(o));
 
-    spdlog::debug("Registered Bare module {} from {}", name, pkg.mainFilePath);
+    spdlog::debug("Registered {} {} from {}", label, name, pkg.mainFilePath);
     return name;
 }
 

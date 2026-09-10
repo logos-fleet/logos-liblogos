@@ -25,6 +25,7 @@ add_executable(logos_core_tests
     test_load_verdict.cpp
     test_load_concurrency.cpp
     test_inproc_container.cpp
+    test_web_container.cpp
     test_embedded_bare_module.cpp
 )
 

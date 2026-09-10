@@ -41,6 +41,17 @@ pkgs.stdenv.mkDerivation {
     if [ -f src/logos_core/logos_core.h ]; then
       cp src/logos_core/logos_core.h $out/include/
     fi
+
+    # web_module_view.h -- the seam a HOST fills, so it has to be reachable
+    # from outside this repo. A `web` module is a page, and the only process
+    # that can open one is the frontend (logoscore under `--container web`, a
+    # desktop shell, a phone app); liblogos deliberately names no browser. It
+    # includes logos-protocol's message_channel.h, which the copy below
+    # supplies. Kept in step with CMakeLists.txt's install(FILES ...) -- this
+    # derivation does not run that rule, so both lists exist and both matter.
+    if [ -f src/logos_core/web_module_view.h ]; then
+      cp src/logos_core/web_module_view.h $out/include/
+    fi
     
     # Also copy SDK headers if available (including logos_mode.h)
     if [ -n "${toString logosSdk}" ] && [ -d "${toString logosSdk}/include" ]; then

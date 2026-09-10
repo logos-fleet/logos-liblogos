@@ -60,7 +60,8 @@ struct ModuleInfo {
     // can run it. Empty (the overwhelming default) means a Qt plugin, the only
     // shape that existed before the Native container; "bare" is a Bare module
     // image — no Qt plugin metadata, the module-impl C ABI instead, run
-    // in-process by InProcContainer. Set at discovery, read by
+    // in-process by InProcContainer; "web" is a page, run in a webview by
+    // WebContainer. Set at discovery, read by
     // ModuleManager::loadModuleInternal when it stamps ModuleDescriptor::format.
     std::string format;
     // Registered by addEmbeddedBareModule rather than found by a scan: the
@@ -124,10 +125,10 @@ public:
     std::string modulePath(const std::string& name) const;
     // A JSON array describing every known module: one object per module with
     // its name, path, loaded flag, load timestamp (loaded_at, unix seconds; 0
-    // when not loaded), artifact `format` ("" for a Qt plugin, "bare" for a
-    // Bare module image), `pid` (the loaded module's process id, -1 for a
-    // module the Native container runs in-process, null when not loaded),
-    // direct dependencies, direct dependents, and full embedded metadata
+    // when not loaded), artifact `format` ("" for a Qt plugin, "bare" for a Bare
+    // module image, "web" for a page), `pid` (the loaded module's process id,
+    // -1 for a module the Native container runs in-process, null when not
+    // loaded), direct dependencies, direct dependents, and full embedded metadata
     // (parsed from the cached metadata JSON; null when unreadable). This is the
     // data backing logos_core_get_modules_info.
     nlohmann::json allModulesInfo() const;
@@ -210,19 +211,25 @@ private:
     std::string processModuleInternal(const std::string& modulePath,
                                       const std::string& trustedName = {});
 
-    // The Bare-module arm of the same upsert.
+    // The MANIFEST arm of the same upsert: the module whose metadata lives in
+    // its package manifest rather than in its artifact — a Bare module image
+    // ("bare") and a web page ("web") both.
     //
-    // A Bare module carries NO Qt plugin metadata — that is what "bare" means —
-    // so processModuleInternal's very first step, extractMetadata(), finds
-    // nothing and it refuses the module. Its identity and its dependency edges
-    // come from the package manifest instead, which the package manager has
-    // already read and validated, and which is the trusted source in any case
-    // (processModuleInternal only ever CHECKS the embedded name against it).
+    // Neither carries Qt plugin metadata, so processModuleInternal's very first
+    // step, extractMetadata(), finds nothing and it refuses the module. Their
+    // identity and their dependency edges come from the package manifest
+    // instead, which the package manager has already read and validated, and
+    // which is the trusted source in any case (processModuleInternal only ever
+    // CHECKS the embedded name against it).
     //
-    // Called for a package the discovery gate already identified as a Bare
-    // module (looksLikeBareModule). Returns the registered name, or "" when
-    // that name is not a valid module identifier.
-    std::string processBareModuleInternal(const InstalledPackage& pkg);
+    // Called for a package the discovery gate already identified as one shape
+    // or the other (looksLikeBareModule / looksLikeWebModule); `format` is
+    // stamped onto ModuleInfo::format and `label` names the shape in the log.
+    // Returns the registered name, or "" when that name is not a valid module
+    // identifier.
+    std::string processManifestModuleInternal(const InstalledPackage& pkg,
+                                              const std::string& format,
+                                              const char* label);
 
     // Re-derives every ModuleInfo::dependents list by inverting the
     // dependencies edges across m_modules. Called at the tail of

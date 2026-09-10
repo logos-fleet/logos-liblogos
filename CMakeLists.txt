@@ -122,6 +122,16 @@ install(TARGETS logos_core
 )
 
 # Install headers
+#
+# web_module_view.h joins logos_core.h because it is a SEAM A HOST FILLS, not an
+# internal type: a `web` module is a page, and the only process that can open one
+# is the frontend (logoscore under `--container web`, a desktop shell, a phone
+# app). liblogos deliberately names no browser -- it is linked into a headless
+# CLI, a desktop shell and a static iOS core, and exactly one of those can host a
+# Chromium -- so the backend is installed from OUTSIDE, and that requires the
+# declaration. It pulls in logos-protocol's message_channel.h, which
+# logos-protocol installs for the same reason.
 install(FILES src/logos_core/logos_core.h
+              src/logos_core/web_module_view.h
     DESTINATION include
 )

@@ -54,7 +54,8 @@ namespace ModuleManager {
     // BEFORE logos_core_start(). Empty clears any previously set policy.
     void setAccessPolicy(const std::string& policyJson);
 
-    // The operator's container assertion — "auto" | "inproc" | "subprocess".
+    // The operator's container assertion — "auto" | "inproc" | "subprocess" |
+    // "web".
     // See logos_core_set_container_policy in logos_core.h for what each means
     // and why it constrains rather than selects. An empty string resets to
     // "auto"; an unrecognised value is rejected and leaves the policy alone.

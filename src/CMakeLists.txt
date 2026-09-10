@@ -212,6 +212,22 @@ set(LOGOS_CORE_SOURCES
     logos_core/bare_module_loader.h
     logos_core/inproc_container.cpp
     logos_core/inproc_container.h
+    # The WEB CONTAINER, registered the same way and for the same reason. The
+    # webview itself is NOT here: WebModuleView is a runtime seam a host fills
+    # (`logoscore --container web` does), so liblogos names no browser and a
+    # process that never opens a page pays for none.
+    logos_core/web_call_router.cpp
+    logos_core/web_call_router.h
+    logos_core/web_container.cpp
+    logos_core/web_container.h
+    logos_core/web_module_glue.cpp
+    logos_core/web_module_glue.h
+    logos_core/web_module_loader.cpp
+    logos_core/web_module_loader.h
+    logos_core/web_module_view.cpp
+    logos_core/web_module_view.h
+    logos_core/web_qt_dispatch.cpp
+    logos_core/web_qt_dispatch.h
 )
 
 # The format-loader implementation and the logos_host_qt host binary live in the

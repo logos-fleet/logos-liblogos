@@ -313,12 +313,14 @@ LOGOS_CORE_EXPORT void logos_core_set_access_policy(const char* policy_json);
 //                 whichever container its artifact calls for.
 //   "inproc"      — every module must be a Bare module. A Qt plugin is refused.
 //   "subprocess"  — every module must be a Qt plugin. A Bare module is refused.
+//   "web"         — every module must be a web variant (a page). A Qt plugin
+//                 and a Bare module are both refused.
 //
 // The reason it is an assertion and not a switch: a module has ONE artifact in
-// a given directory, and no flag can turn a Qt plugin into a Bare module or the
-// reverse. A flag that silently fell back would make `--container inproc` mean
-// "in-process if you happen to have built it that way", which is not something
-// an operator can rely on or a CI job can assert.
+// a given directory, and no flag can turn a Qt plugin into a Bare module, or
+// either of them into a page. A flag that silently fell back would make
+// `--container inproc` mean "in-process if you happen to have built it that
+// way", which is not something an operator can rely on or a CI job can assert.
 //
 // Must be called before the modules it governs are loaded. An unrecognised
 // value is refused and leaves the previous policy in place.
