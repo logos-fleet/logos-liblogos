@@ -22,6 +22,7 @@ add_executable(logos_core_tests
     test_dependency_gate.cpp
     test_module_state_observer.cpp
     test_expected_exit_marks.cpp
+    test_module_supervisor.cpp
     test_load_verdict.cpp
     test_load_concurrency.cpp
     test_inproc_container.cpp

@@ -11,7 +11,10 @@
 #include <QThread>
 #include <QTimer>
 
+#include <algorithm>
 #include <atomic>
+#include <memory>
+#include <mutex>
 #include <utility>
 
 namespace LogosCore {
@@ -73,29 +76,107 @@ QVariant WebModuleGlue::awaitPage(const QString& methodName, const QVariantList&
     if (!app || QThread::currentThread() != app->thread())
         return m_page->callMethod(authToken(), methodName, args, kCallTimeoutMs);
 
-    QVariant result;
-    std::atomic<bool> done{false};
+    // WHERE THE REPLY LANDS, AND WHY IT IS NOT THIS STACK FRAME.
+    //
+    // The reply is delivered asynchronously, on the transport's own thread, and
+    // nothing guarantees it arrives before this function returns. The wait ends
+    // at its deadline whether or not an answer came — and, since a page that
+    // dies is now told to give up (abandonPendingCalls), usually the moment the
+    // page goes away. A callback holding references INTO this frame would then
+    // write into a dead stack and post to a destroyed QEventLoop, which is a
+    // segfault in the host with the page's death nowhere on the stack.
+    //
+    // So the callback and this frame share a heap record instead, and the loop
+    // pointer in it is cleared under the lock before the loop goes out of
+    // scope. A reply that arrives before the clear posts to a loop that is
+    // still alive (Qt discards posted events for an object destroyed after);
+    // one that arrives after finds nullptr and does nothing.
+    struct Waiter {
+        std::mutex mu;
+        QEventLoop* loop = nullptr;
+        QVariant result;
+        bool done = false;
+    };
+    auto waiter = std::make_shared<Waiter>();
+
     QEventLoop loop;
-    QEventLoop* waiting = &loop;
+    {
+        std::lock_guard<std::mutex> lock(waiter->mu);
+        waiter->loop = &loop;
+    }
+
+    // FROM HERE TO THE RETURN this glue is inside a nested event loop: the
+    // container must not destroy the module while that is true, and it needs a
+    // way to end the wait when the page dies. See isAwaitingPage() and
+    // abandonPendingCalls().
+    struct Awaiting {
+        WebModuleGlue& glue;
+        QEventLoop* loop;
+        Awaiting(WebModuleGlue& g, QEventLoop* l) : glue(g), loop(l)
+        {
+            ++glue.m_awaiting;
+            std::lock_guard<std::mutex> lock(glue.m_waitMutex);
+            glue.m_waits.push_back(loop);
+        }
+        ~Awaiting()
+        {
+            {
+                std::lock_guard<std::mutex> lock(glue.m_waitMutex);
+                const auto it = std::find(glue.m_waits.begin(), glue.m_waits.end(), loop);
+                if (it != glue.m_waits.end()) glue.m_waits.erase(it);
+            }
+            --glue.m_awaiting;
+        }
+    } awaiting(*this, &loop);
 
     m_page->callMethodAsync(authToken(), methodName, args, kCallTimeoutMs,
-        [&result, &done, waiting](QVariant value) {
-            result = std::move(value);
-            done.store(true);
+        [waiter](QVariant value) {
+            std::lock_guard<std::mutex> lock(waiter->mu);
+            waiter->result = std::move(value);
+            waiter->done = true;
             // Queued, because this lands on the transport's delivery thread.
             // A quit posted before exec() begins is NOT lost: it is an event on
-            // this thread's queue and the loop below will process it.
-            QMetaObject::invokeMethod(waiting, [waiting] { waiting->quit(); },
-                                      Qt::QueuedConnection);
+            // that thread's queue and the loop below will process it.
+            if (waiter->loop) {
+                QEventLoop* waking = waiter->loop;
+                QMetaObject::invokeMethod(waking, [waking] { waking->quit(); },
+                                          Qt::QueuedConnection);
+            }
         });
 
-    if (!done.load()) {
+    bool answered = false;
+    {
+        std::lock_guard<std::mutex> lock(waiter->mu);
+        answered = waiter->done;
+    }
+    if (!answered) {
         // The page's own deadline is the async call's; this one only stops the
         // loop from outliving it if a reply is dropped outright.
         QTimer::singleShot(kCallTimeoutMs + 1000, &loop, [&loop] { loop.quit(); });
         loop.exec();
     }
-    return result;
+
+    std::lock_guard<std::mutex> lock(waiter->mu);
+    waiter->loop = nullptr;
+    return waiter->result;
+}
+
+void WebModuleGlue::abandonPendingCalls()
+{
+    std::vector<QPointer<QEventLoop>> waits;
+    {
+        std::lock_guard<std::mutex> lock(m_waitMutex);
+        waits = m_waits;
+    }
+    // Queued and addressed to the loop itself: the caller is the thread that
+    // noticed the page die, which is not the thread sitting in exec(), and a
+    // loop that has already ended on its own is a receiver Qt discards the
+    // event for.
+    for (const QPointer<QEventLoop>& loop : waits) {
+        if (!loop) continue;
+        QMetaObject::invokeMethod(loop.data(), [l = loop]() { if (l) l->quit(); },
+                                  Qt::QueuedConnection);
+    }
 }
 
 QVariant WebModuleGlue::callMethod(const QString& methodName, const QVariantList& args)

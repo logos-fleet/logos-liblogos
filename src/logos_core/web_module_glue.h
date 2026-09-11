@@ -4,14 +4,18 @@
 #include <logos_provider_object.h>
 
 #include <QJsonArray>
+#include <QPointer>
 #include <QString>
 #include <QVariant>
 #include <QVariantList>
 
+#include <atomic>
 #include <mutex>
 #include <string>
+#include <vector>
 
 class LogosObject;
+class QEventLoop;
 
 namespace LogosCore {
 
@@ -85,11 +89,44 @@ public:
     // timeout, named here so the one place it is chosen is greppable.
     static constexpr int kCallTimeoutMs = 30000;
 
+    // TRUE while this glue is inside a synchronous call into the page.
+    //
+    // Which is to say: a NESTED EVENT LOOP is running, and below it on the
+    // stack sit this object, the QtRO node that dispatched the call into it and
+    // everything between. The Web container asks before it destroys a module
+    // whose page has died, because a page can die in the middle of the very
+    // call that is waiting here — a panic inside a `web` variant's Wasm host is
+    // exactly that — and freeing those objects from inside that loop is a
+    // use-after-free in the host when the wait unwinds.
+    //
+    // Atomic because it is read from the thread that noticed the death, which
+    // is the backend's, not this one's.
+    bool isAwaitingPage() const { return m_awaiting.load() > 0; }
+
+    // STOP WAITING: the page is gone and no Result is coming.
+    //
+    // Called by the container the moment it learns the page died. Without it a
+    // call that was in flight sits out its whole deadline — twenty-one seconds
+    // of waiting for an answer from a process that has already exited — and,
+    // worse, the module cannot be destroyed for that long, because the wait
+    // above is what makes destroying it unsafe. A module whose page dies would
+    // then be un-reloadable for the same twenty-one seconds: the old node still
+    // holds the name a new one would need.
+    void abandonPendingCalls();
+
 private:
     // Call the page and wait for its answer, pumping this thread's event loop
     // when it is the Qt main thread — see the definition, where the reason is a
     // deadlock rather than a preference.
     QVariant awaitPage(const QString& methodName, const QVariantList& args);
+
+    std::atomic<int> m_awaiting{0};
+
+    // The nested loops awaitPage is sitting in, innermost last. QPointer
+    // because a loop can also end on its own (its deadline) and the container
+    // may be reading this list from another thread while it does.
+    mutable std::mutex m_waitMutex;
+    std::vector<QPointer<QEventLoop>> m_waits;
 
     // The credential this relay presents to the page: the module's own root
     // token, as the core minted it and deliverCredential handed it over. Held

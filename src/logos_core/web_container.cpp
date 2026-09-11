@@ -13,11 +13,15 @@
 
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QMetaObject>
 #include <QString>
 #include <QThread>
+#include <QTimer>
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
+#include <functional>
+#include <memory>
 #include <thread>
 #include <utility>
 
@@ -62,6 +66,9 @@ WebContainer::WebContainer() = default;
 WebContainer::~WebContainer()
 {
     terminateAll();
+    // Anything still parked has no later to be swept in. The token goes with
+    // this object, so a sweep already armed finds it expired and does nothing.
+    tearDownAllRetired();
 }
 
 void WebContainer::setHostApi(LogosAPI* hostApi)
@@ -87,6 +94,14 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
                           std::function<void(const std::string& name)> onTerminated,
                           LoadedModuleHandle& out)
 {
+    // A BACKSTOP, and it should find nothing: a lost page is destroyed where it
+    // is noticed unless a call into it was waiting, and the sweep that follows
+    // such a wait runs long before anyone gets round to loading the module
+    // again. It is here because of what a leftover would mean — the old
+    // LogosAPI still publishing the name this load is about to take, and a
+    // module that answers nothing.
+    sweepRetired();
+
     // The factory is fetched OUTSIDE the container's lock and invoked outside
     // it too: opening a webview is host code that may take locks of its own.
     WebModuleViewFactory factory = webModuleViewFactory();
@@ -347,11 +362,34 @@ void WebContainer::retire(const std::string& name, Retirement why)
     if (!instance) return;
 
     auto onTerminated = instance->onTerminated;
-    tearDown(*instance);
-    if (why == Retirement::PageLost)
+
+    if (why == Retirement::PageLost) {
         spdlog::warn("Web module {} lost its page", name);
-    else
+        // END ANY WAIT FIRST. A call that was in flight when the page died has
+        // no answer coming, and until it gives up nothing about this module can
+        // be destroyed — including the LogosAPI that still holds the name a
+        // reload needs.
+        WebModuleGlue* glue = instance->glue.get();
+        if (glue) glue->abandonPendingCalls();
+
+        // TORN DOWN HERE UNLESS THAT WAIT IS STILL UNWINDING, AND THAT MATTERS.
+        // Destroying the module's LogosAPI is what unpublishes its name, and a
+        // module loaded again takes the same QtRO address — so an old node
+        // still standing when a new one binds is a module that answers nothing.
+        // Parking it is the one case that cannot be settled here; see
+        // deferTearDown.
+        if (glue && glue->isAwaitingPage())
+            deferTearDown(std::move(instance));
+        else
+            tearDown(*instance);
+    } else {
+        // A deliberate unload, and its caller is entitled to assume the module
+        // is gone when unloadModule() returns: the load path checks
+        // hasModule() on the way back in, and a reload that found the old
+        // page's channel still open would publish over it.
         spdlog::info("Web module stopped: {}", name);
+        tearDown(*instance);
+    }
 
     // Announced last, matching the Native and subprocess containers: the
     // callback is the signal that the module is gone, so everything that makes
@@ -360,9 +398,116 @@ void WebContainer::retire(const std::string& name, Retirement why)
     if (onTerminated) onTerminated(name);
 }
 
+// WHY A DEAD PAGE IS SOMETIMES NOT DESTROYED WHERE IT IS NOTICED.
+//
+// A page can die in the middle of a call INTO it, and a panic inside a `web`
+// variant's Wasm host is precisely that. The stack at that moment, in a daemon,
+// is three levels of Qt deep:
+//
+//   QRemoteObjectSourceIo::onServerRead      <- this module's own QtRO node,
+//     WebModuleGlue::callMethod                 dispatching the call
+//       QEventLoop::exec                      <- waiting for the page's Result
+//         ...the page dies, and the backend reports it here...
+//
+// Destroying the module's LogosAPI from in there frees the QtRO node whose
+// onServerRead is still on the stack; when the wait unwinds, that frame returns
+// into freed memory. The host segfaults — in a container whose entire reason to
+// exist is that a module's crash must not be the host's.
+//
+// deleteLater() is NOT the answer, and it is worth saying why, because it is
+// the obvious one: Qt holds a deferred deletion only until the event loop that
+// posted it returns, and the loop that posted it here is the innermost one —
+// the very one the glue is spinning inside that onServerRead frame.
+//
+// So this parks the module and comes back for it. The instance keeps everything
+// it had, including the glue whose wait is the reason to wait; a sweep runs on
+// each turn of the event loop until that wait has unwound, and only then
+// destroys it. Nothing reaches the module in the meantime: the core marked it
+// unloaded when it took the announcement, and a call to an unloaded module is
+// refused long before it could get this far.
+void WebContainer::deferTearDown(std::unique_ptr<Instance> instance)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_retired.push_back(std::move(instance));
+    }
+    armSweep();
+}
+
+// Come back for the parked modules on the next turn of the event loop.
+//
+// Two hops, because a page's death is noticed on the backend's own thread: the
+// queued call puts us on the Qt main thread, and the timer is created THERE so
+// it belongs to that thread whatever thread armed it.
+//
+// The token is what makes a container safe to destroy with a sweep outstanding:
+// it expires with the container, and the timer that finds it expired does
+// nothing. The parked modules are torn down by ~WebContainer instead.
+void WebContainer::armSweep()
+{
+    QCoreApplication* app = QCoreApplication::instance();
+    if (!app) {
+        // No event loop to come back on. There is also no nested Qt event loop
+        // to be inside — the wait in awaitPage needs one — so there is nothing
+        // to wait for.
+        sweepRetired();
+        return;
+    }
+
+    std::weak_ptr<int> token = m_alive;
+    QMetaObject::invokeMethod(app, [this, token]() {
+        if (token.expired()) return;
+        QTimer::singleShot(0, [this, token]() {
+            if (token.expired()) return;
+            sweepRetired();
+        });
+    }, Qt::QueuedConnection);
+}
+
+// Destroy every parked module that is no longer being waited on, and come back
+// for the rest.
+//
+// The instances are lifted out UNDER the lock and torn down WITHOUT it, for the
+// reason tearDown's own comment gives: closing a channel waits for an in-flight
+// delivery, and that delivery may be inside the relay, which re-enters this
+// container.
+void WebContainer::sweepRetired()
+{
+    std::vector<std::unique_ptr<Instance>> ready;
+    bool stillWaiting = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto it = m_retired.begin(); it != m_retired.end();) {
+            if ((*it)->glue && (*it)->glue->isAwaitingPage()) {
+                stillWaiting = true;
+                ++it;
+                continue;
+            }
+            ready.push_back(std::move(*it));
+            it = m_retired.erase(it);
+        }
+    }
+
+    for (std::unique_ptr<Instance>& instance : ready) tearDown(*instance);
+    if (stillWaiting) armSweep();
+}
+
+// Everything still parked, whatever it is doing. The last word, and the only
+// caller is the destructor: the container is going away, so there is no later.
+void WebContainer::tearDownAllRetired()
+{
+    std::vector<std::unique_ptr<Instance>> retired;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        retired.swap(m_retired);
+    }
+    for (std::unique_ptr<Instance>& instance : retired) tearDown(*instance);
+}
+
 void WebContainer::terminate(const std::string& name)
 {
     retire(name, Retirement::Unloaded);
+    sweepRetired();
 }
 
 // Stop routing, unpublish, drop the relay, stop the peer, close the page — in
@@ -403,6 +548,7 @@ void WebContainer::terminateAll()
         for (const auto& [name, instance] : m_modules) names.push_back(name);
     }
     for (const auto& name : names) terminate(name);
+    sweepRetired();
 }
 
 // A page's death, reported from WHEREVER THE BACKEND NOTICED IT.

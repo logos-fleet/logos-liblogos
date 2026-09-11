@@ -9,6 +9,7 @@
 #include "web_module_loader.h"
 #include "bare_module_loader.h"
 #include "module_state_observer.h"
+#include "module_supervisor.h"
 #include <logos_container/container_factory.h>
 #include <logos_module_loader/format_loader_factory.h>
 #include <spdlog/spdlog.h>
@@ -173,6 +174,11 @@ namespace {
         static std::unordered_set<std::string> s;
         return s;
     }
+
+    // Defined below loadModuleInternal, which is where the death that reaches
+    // it is described; declared here because the callback that calls it is
+    // built inside that function.
+    void superviseUnexpectedExit(const std::string& name);
 
     void markExitExpected(const std::string& name) {
         std::lock_guard<std::mutex> g(expectedExitMutex());
@@ -1056,12 +1062,18 @@ namespace {
             if (consumeExpectedExit(n)) {
                 observer.record(n, logos::module_state::kStopping,
                                 logos::module_state::kUnloaded);
-            } else {
-                observer.record(n, logos::module_state::kLoaded,
-                                logos::module_state::kError, std::nullopt,
-                                std::nullopt, "module exited without being asked to");
+                observer.flush();
+                return;
             }
+
+            observer.record(n, logos::module_state::kLoaded,
+                            logos::module_state::kError, std::nullopt,
+                            std::nullopt, "module exited without being asked to");
+            // Flushed BEFORE the supervisor is asked, so a consumer watching
+            // the feed sees the failure and then whatever the policy does about
+            // it, in that order.
             observer.flush();
+            superviseUnexpectedExit(n);
         };
 
         // Past here a child process may exist, so a termination belongs to this
@@ -1167,6 +1179,62 @@ namespace {
         return true;
     }
 
+    // The load a SUPERVISOR asks for, which differs from the operator's
+    // ModuleManager::loadModule in exactly one way: it does not clear the
+    // module's death history. Clearing it there is what gives an operator who
+    // loads a module by hand a fresh budget; doing it here would make every
+    // restart the first one and turn the budget into no budget at all.
+    bool restartModule(const std::string& name) {
+        // BEFORE the lock guard, so it is destroyed after it. See rule 1.
+        logos::ScopedModuleStateFlush stateFlusher;
+        ScopedLoadEntry entry;
+        if (entry.reentrant) return refuseReentrantLoad(name);
+        std::shared_lock<std::shared_mutex> fleet(fleetMutex());
+        return loadModuleInternal(name.c_str());
+    }
+
+    // A module died without being asked to. Ask the policy what to do about it
+    // and say, in the log, what was decided and why — a module that came back
+    // on its own and a module that stayed down are both surprising to whoever
+    // is reading, and neither should have to be inferred.
+    void superviseUnexpectedExit(const std::string& name) {
+        auto& supervisor = LogosCore::ModuleSupervisor::instance();
+        const LogosCore::SupervisionPolicy policy = supervisor.policy();
+        const LogosCore::ModuleSupervisor::Verdict verdict =
+            supervisor.onUnexpectedExit(name);
+
+        using Decision = LogosCore::ModuleSupervisor::Decision;
+        if (verdict.decision == Decision::Disabled) return;
+
+        if (verdict.decision == Decision::BudgetExhausted) {
+            spdlog::error("Module {} has died {} times in the last {} ms, past a "
+                          "supervision budget of {}. Leaving it down: a module "
+                          "that will not stay up needs an operator, not another "
+                          "restart.",
+                          name, verdict.attempt, policy.window.count(),
+                          policy.maxRestarts);
+            return;
+        }
+
+        spdlog::warn("Module {} exited without being asked to; loading it again "
+                     "in {} ms (restart {} of {})",
+                     name, verdict.delay.count(), verdict.attempt,
+                     policy.maxRestarts);
+
+        // NOT ON THIS THREAD. The death is announced from wherever the
+        // container noticed it — an asio thread, a socket pump — and the load
+        // path must not run there. See RestartScheduler.
+        LogosCore::restartScheduler()(verdict.delay, [name]() {
+            if (!registryInstance().isKnown(name)) {
+                spdlog::warn("Not restarting {}: it is no longer a known module",
+                             name);
+                return;
+            }
+            if (!restartModule(name))
+                spdlog::error("Restarting module {} failed", name);
+        });
+    }
+
     // Callers hold fleetMutex(): shared for a single unload, exclusive for the
     // cascade, which needs one span so a load cannot interleave between the
     // dependents and the target. Takes `name`'s lock like the load path does.
@@ -1214,6 +1282,11 @@ namespace {
         }
 
         registryInstance().markUnloaded(name);
+
+        // The operator has taken this module out. Whatever it did before that
+        // describes a run that is over, and must not spend the budget of the
+        // next one.
+        LogosCore::ModuleSupervisor::instance().forget(name);
 
         // markUnloaded keeps the dependency edges, so this still resolves them.
         refreshDerivedRestrictionsForDependenciesOf(name);
@@ -1395,6 +1468,11 @@ namespace ModuleManager {
     }
 
     bool loadModule(const char* moduleName) {
+        // AN OPERATOR LOADING A MODULE IS AN INTERVENTION, and it re-arms
+        // supervision: the deaths recorded against this name happened to a run
+        // that whoever is calling has decided to replace. (The supervisor's own
+        // restart goes through restartModule, which does not do this.)
+        if (moduleName) LogosCore::ModuleSupervisor::instance().forget(moduleName);
         // BEFORE the lock guard, so it is destroyed after it. See rule 1.
         logos::ScopedModuleStateFlush stateFlusher;
         ScopedLoadEntry entry;
@@ -1407,6 +1485,8 @@ namespace ModuleManager {
     // module_manager.h; repeating it here would not compile.
     bool loadModuleWithDependencies(const char* moduleName,
                                     DependencyResolver::OptionalLoad optionalLoad) {
+        // The same intervention as loadModule's, for the same reason.
+        if (moduleName) LogosCore::ModuleSupervisor::instance().forget(moduleName);
         // BEFORE the lock guard, so it is destroyed after it. See rule 1.
         logos::ScopedModuleStateFlush stateFlusher;
         ScopedLoadEntry entry;
@@ -1666,6 +1746,8 @@ namespace ModuleManager {
         }
         // Same rationale again: the next run may have a host that does report.
         hostStaysSilent().store(false);
+        // ...and the next run's modules have not crashed yet.
+        LogosCore::ModuleSupervisor::instance().clear();
     }
 
     char** getLoadedModulesCStr() {

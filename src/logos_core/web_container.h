@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class LogosAPI;
 
@@ -146,8 +147,32 @@ private:
     // m_mutex released — see the definition.
     static void tearDown(Instance& instance);
 
+    // Park a LOST page's parts for destruction later. A lost page is noticed
+    // from wherever the backend happened to be — including from inside the
+    // module's own QtRO dispatch, three Qt frames down. See the definition,
+    // where the alternative is a segfault in the host.
+    void deferTearDown(std::unique_ptr<Instance> instance);
+
+    // Destroy every parked module that is no longer being waited on, and come
+    // back for the rest.
+    void sweepRetired();
+
+    // Ask to be called back on the next turn of the Qt main thread's event
+    // loop, which is where sweepRetired runs.
+    void armSweep();
+
+    // Everything still parked, waited on or not. The destructor's, because the
+    // container is going away and there is no later.
+    void tearDownAllRetired();
+
     mutable std::mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<Instance>> m_modules;
+    // Pages that died while a call into them was waiting, still whole, until
+    // that wait has unwound.
+    std::vector<std::unique_ptr<Instance>> m_retired;
+    // Expires with this container, so a sweep that is already armed can tell
+    // whether there is still anything to sweep for.
+    std::shared_ptr<int> m_alive = std::make_shared<int>(0);
     LogosAPI* m_hostApi = nullptr;
     WebHostRoutes* m_hostRoutes = nullptr;
 };

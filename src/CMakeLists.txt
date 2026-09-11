@@ -193,6 +193,8 @@ set(LOGOS_CORE_SOURCES
     logos_core/module_state_observer.h
     logos_core/module_manager.cpp
     logos_core/module_manager.h
+    logos_core/module_supervisor.cpp
+    logos_core/module_supervisor.h
     logos_core/module_loader.h
     logos_core/composite_module_loader.cpp
     logos_core/composite_module_loader.h

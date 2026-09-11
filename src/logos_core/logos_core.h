@@ -326,6 +326,37 @@ LOGOS_CORE_EXPORT void logos_core_set_access_policy(const char* policy_json);
 // value is refused and leaves the previous policy in place.
 LOGOS_CORE_EXPORT void logos_core_set_container_policy(const char* policy);
 
+// WHAT HAPPENS TO A MODULE THAT DIED WITHOUT BEING ASKED TO.
+//
+// The default is nothing: the lifecycle feed records `loaded -> error` and the
+// module stays gone. That is the right answer for a module whose state died with
+// it — bringing it back without saying so would be a lie told to every consumer
+// holding a handle on it — and it is what every host got before this existed.
+//
+// Set a budget and a module that dies is LOADED AGAIN, up to `max_restarts`
+// times inside `window_ms`, `backoff_ms` after each death. Past the budget it is
+// left down and the reason is logged: a module that will not stay up needs an
+// operator, not another restart. An operator who loads or unloads it by hand
+// re-arms the budget.
+//
+// WHO THIS IS FOR. A `web` variant's Wasm host, first: the image traps, the
+// Worker dies, the page survives to report it, and the image keeps no state
+// outside its own linear memory, so a fresh one is a complete recovery rather
+// than a guess (ADR 0003, slice 26). The same holds for any module a host knows
+// to be stateless — which is why this is a policy the host states rather than
+// a behaviour liblogos picks.
+//
+// `max_restarts` <= 0 turns supervision off. May be called at any time; it
+// governs deaths from the moment it returns, and changing it starts the budget
+// over.
+//
+// An operator with no way to call this can set LOGOS_SUPERVISION in the
+// environment instead — `max[,windowMs[,backoffMs]]`, e.g. "3" or "3,60000,250"
+// — which logos_core_start() reads when the host has set no policy of its own.
+LOGOS_CORE_EXPORT void logos_core_set_supervision_policy(int max_restarts,
+                                                         int window_ms,
+                                                         int backoff_ms);
+
 // Re-scan all module directories and update known modules.
 // Call after installing new modules so they become discoverable.
 LOGOS_CORE_EXPORT void logos_core_refresh_modules();
