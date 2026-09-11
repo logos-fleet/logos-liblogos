@@ -27,6 +27,17 @@ namespace {
 // contract's own words rather than a C++ or Qt spelling.
 constexpr const char* kVoidReturn   = "void";
 constexpr const char* kResultReturn = "result";
+// ...and the SAME return type under the other spelling a generator emits for
+// it. logos-cpp-sdk publishes the LIDL text (lidlTypeToPublishedName ->
+// `result`); logos-rust-sdk publishes the Qt type name (qt_type_name ->
+// `LogosResult`). Both are real contracts in the tree, and a glue that knows
+// only one of them classifies every `result` method of every module written in
+// the other language as an ordinary value -- the module's
+// {success, value, error} map then reaches the caller UNOPENED, so a FAILURE
+// arrives as a successful call returning a map and the error channel the
+// contract promises is silently gone. Measured on chat_module (Rust) in the
+// iOS smoke host: `init` failed and the caller was told it had succeeded.
+constexpr const char* kResultReturnQt = "LogosResult";
 
 // What the destructor waits for a worker it should never have to wait for: the
 // container stops the thread explicitly and refuses to destroy the glue if that
@@ -196,7 +207,8 @@ void BareModuleGlue::readContract()
         const QString ret = obj.value("returnType").toString();
         if (ret == QLatin1String(kVoidReturn))
             m_voidMethods.insert(name);
-        else if (ret == QLatin1String(kResultReturn))
+        else if (ret == QLatin1String(kResultReturn)
+                 || ret == QLatin1String(kResultReturnQt))
             m_resultMethods.insert(name);
     }
 

@@ -9,7 +9,8 @@
 // can be dlopen'd by a test binary with no host image behind it.
 //
 // It answers a contract with one of each return shape the glue must classify at
-// runtime (`uint`, `void`, `result`) plus an event, because those are exactly
+// runtime (`uint`, `void`, `result` under both of its published spellings) plus
+// an event, because those are exactly
 // the distinctions the GENERATED Qt glue is handed as compile-time literals and
 // that BareModuleGlue has to rediscover from logos_module_get_methods().
 
@@ -91,6 +92,7 @@ BARE_FIXTURE_EXPORT char* logos_module_get_methods(void)
        "parameters":[{"type":"uint","name":"by"}]},
       {"name":"total","signature":"total()","returnType":"uint","isInvokable":true},
       {"name":"describe","signature":"describe()","returnType":"result","isInvokable":true},
+      {"name":"describeQt","signature":"describeQt()","returnType":"LogosResult","isInvokable":true},
       {"name":"context","signature":"context()","returnType":"tstr","isInvokable":true},
       {"name":"caller","signature":"caller()","returnType":"tstr","isInvokable":true},
       {"name":"inboundCaller","signature":"inboundCaller()","returnType":"tstr","isInvokable":true},
@@ -117,6 +119,12 @@ BARE_FIXTURE_EXPORT char* logos_module_dispatch(const char* method, const char* 
         return dup(std::to_string(g_total));
     if (m == "describe")
         return dup(R"JSON({"success":true,"value":{"name":"bare_fixture"}})JSON");
+    // The SAME return shape, published under the OTHER spelling a generator
+    // emits for it. logos-cpp-sdk writes the LIDL text (`result`); the Rust SDK
+    // writes the Qt type name (`LogosResult`). Both are real contracts in the
+    // tree, so the fixture answers both.
+    if (m == "describeQt")
+        return dup(R"JSON({"success":false,"value":null,"error":"describeQt says no"})JSON");
     if (m == "context")
         return dup("\"" + g_context + "\"");
     if (m == "caller")
