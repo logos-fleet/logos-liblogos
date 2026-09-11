@@ -3721,11 +3721,11 @@
         "nixpkgs-windows": "nixpkgs-windows_115"
       },
       "locked": {
-        "lastModified": 1786399295,
-        "narHash": "sha256-Bl1A0UgsIXioZw5uEW8Jl5u7FfZcFMnpYlpsdezFwK0=",
-        "owner": "logos-co",
+        "lastModified": 1789115409,
+        "narHash": "sha256-MzcVTk875vjmMYFZztB9z3dNkRBr1i4rEHZyf3SmxCI=",
+        "owner": "logos-fleet",
         "repo": "logos-nix",
-        "rev": "6e0f4a7120fced10829b0b3a698ff619a11d4605",
+        "rev": "d89b850225edea1ae49c2145e1d516d31f584753",
         "type": "github"
       },
       "original": {
@@ -7122,11 +7122,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1789078096,
-        "narHash": "sha256-+aIrbTmtoBCvoe046CBp37ExvsSM7lmUE/LYnRfFRqM=",
+        "lastModified": 1789132645,
+        "narHash": "sha256-hITodBUsZIrgyQ7mzPBNjK9+ERGcz01K91ABLmsZVrI=",
         "owner": "logos-fleet",
         "repo": "logos-protocol",
-        "rev": "d3bdf2a914b1793ec58860f481faca1d75733ea3",
+        "rev": "990b81ed3302f1244f1bc9e1ccf7ec34c9caaecc",
         "type": "github"
       },
       "original": {
