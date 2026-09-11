@@ -13,6 +13,8 @@
 
 #include <atomic>
 #include <mutex>
+#include <string>
+#include <vector>
 
 class QObject;
 class QThread;
@@ -77,6 +79,19 @@ class QThread;
 // forwarded to the provider's listener on whichever thread emitted it — the
 // same as the generated `multi` glue, whose completion event is emitted from
 // its worker by construction.
+//
+// THE SENTINEL IS A PROMISE, INCLUDING DURING TEARDOWN. Answering the sentinel
+// commits this glue to delivering exactly one completion under that call id,
+// and the consumer transport waits for it — for its whole call timeout if it
+// never comes. Unload is asynchronous with every other module's traffic, so a
+// call lands mid-teardown routinely, and QThread::quit() INTERRUPTS the worker's
+// event dispatcher: the dispatches already posted behind the one in flight are
+// never delivered. So every queued call is registered before it is posted and
+// claimed by exactly one of the worker and stopDispatch — whichever reaches it
+// first — and stopDispatch answers whatever the loop never got to, while the
+// event channel is still attached. Once stopped the glue is RETIRED and answers
+// new calls itself rather than entering an image the host has already told to
+// quiesce.
 namespace LogosCore {
 
 class BareModuleGlue : public LogosProviderBase {
@@ -112,7 +127,13 @@ public:
     // Call before the first dispatch: it starts the worker thread.
     void enableDeferredDispatch();
 
-    // Stop deferring and wait up to `graceMs` for the dispatch in flight.
+    // Retire the glue and wait up to `graceMs` for the dispatch in flight.
+    //
+    // Every call queued and not yet run is answered here with the unloading
+    // error, and every call arriving after it is answered the same way without
+    // entering the image. Both directions matter: the first keeps a promised
+    // completion from going missing, the second keeps a call out of a module
+    // that aboutToUnload has already asked to stop.
     //
     // FALSE means the worker is still INSIDE the module image, and the caller
     // must treat that as fatal for the module rather than continuing: the glue
@@ -156,6 +177,32 @@ private:
     // generated glue would have known at compile time.
     void readContract();
 
+    // What a call gets when the module is on its way out: the same failure
+    // token a dispatch the image refused produces, except that a `result`
+    // method can say why.
+    QVariant unloadingAnswer(const QString& methodName) const;
+
+    // Hand one completion to the provider's listener — from the worker for a
+    // dispatch that ran, from stopDispatch for one that never will.
+    void deliverCompletion(const QString& callId, const QString& methodName,
+                           const QVariant& value);
+
+    // A deferred call that has been posted to the worker and not yet claimed.
+    // The method name rides along because whoever answers the call needs it:
+    // the completion log line, and the return shape unloadingAnswer picks.
+    struct QueuedCall {
+        QString callId;
+        QString methodName;
+    };
+
+    // Take `callId` out of m_queued, answering true to exactly ONE caller. That
+    // is what makes a completion exactly-once when a stop lands while the
+    // worker is part-way through the queue.
+    bool claimQueuedCall(const QString& callId);
+
+    // Claim everything still queued, in the order it was issued.
+    std::vector<QueuedCall> takeQueuedCalls();
+
     std::string m_name;
     std::string m_version;
     const BareModuleAbi& m_abi;
@@ -169,12 +216,21 @@ private:
     mutable std::mutex m_eventMutex;
     EventCallback m_eventCallback;
 
-    // The worker and its thread exist only while deferral is on. m_deferred is
-    // atomic because callMethod reads it on the delivering thread while
-    // enableDeferredDispatch runs on the container's.
-    std::atomic<bool> m_deferred{false};
+    // Inline -> Deferred -> Retired, one way, and never back. A mutex rather
+    // than an atomic because the state, the worker and the queue have to move
+    // TOGETHER: a flip to Retired must not interleave with a call being queued,
+    // or that call would be posted onto a loop nobody is going to answer for.
+    enum class Dispatch { Inline, Deferred, Retired };
+
+    // The worker and its thread exist only between enableDeferredDispatch and
+    // stopDispatch.
+    mutable std::mutex m_dispatchMutex;
+    Dispatch m_dispatch = Dispatch::Inline;
     QThread* m_workerThread = nullptr;
     QObject* m_workerContext = nullptr;
+    // Every deferred call posted and not yet claimed — one entry per call in
+    // flight, so a linear scan is the right shape for it.
+    std::vector<QueuedCall> m_queued;
     std::atomic<unsigned long long> m_callCounter{0};
 };
 

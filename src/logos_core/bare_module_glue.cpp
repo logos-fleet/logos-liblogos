@@ -92,7 +92,10 @@ BareModuleGlue::~BareModuleGlue()
 
 void BareModuleGlue::enableDeferredDispatch()
 {
-    if (m_deferred.load())
+    std::lock_guard<std::mutex> lock(m_dispatchMutex);
+    // Already deferring, or retired — and a retired glue never defers again:
+    // the container's very next steps are to unpublish it and close the image.
+    if (m_dispatch != Dispatch::Inline)
         return;
 
     // A plain QThread, whose default run() is exec(): the worker needs a Qt
@@ -105,21 +108,42 @@ void BareModuleGlue::enableDeferredDispatch()
     m_workerContext = new QObject();
     m_workerContext->moveToThread(m_workerThread);
     m_workerThread->start();
-    m_deferred.store(true);
+    m_dispatch = Dispatch::Deferred;
 }
 
 bool BareModuleGlue::stopDispatch(int graceMs)
 {
-    if (!m_workerThread)
+    QThread* thread = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_dispatchMutex);
+        // RETIRED BEFORE THE LOOP IS ASKED TO STOP, so the set of calls this
+        // owes a completion to can only shrink from here: a caller either
+        // registered its call under the lock already, or arrives after this and
+        // is refused outright rather than posted onto a stopping loop.
+        m_dispatch = Dispatch::Retired;
+        thread = m_workerThread;
+    }
+    if (!thread)
         return true;
 
-    // Deferral off BEFORE the loop is asked to stop, so a call delivered during
-    // teardown runs inline rather than being queued onto a thread that will
-    // never run it again.
-    m_deferred.store(false);
+    thread->quit();
+    const bool stopped = thread->wait(graceMs);
 
-    m_workerThread->quit();
-    if (!m_workerThread->wait(graceMs)) {
+    // WHAT quit() LEAVES BEHIND. Asking a QThread to quit interrupts its event
+    // dispatcher, so the dispatches already posted behind the one in flight are
+    // never delivered — measured at 8 of 9 for a burst queued behind a call in
+    // flight. Each of those callers holds a pending-call sentinel, which is a
+    // promise of a completion over the event channel, and the teardown this is
+    // part of is about to take that channel away. So they are answered HERE,
+    // while the listener is still attached, instead of timing out.
+    //
+    // Done whether or not the wait succeeded: on the failure path the worker is
+    // still running and may yet reach one of them, and claimQueuedCall is what
+    // keeps exactly one of the two answering each call.
+    for (const QueuedCall& call : takeQueuedCalls())
+        deliverCompletion(call.callId, call.methodName, unloadingAnswer(call.methodName));
+
+    if (!stopped) {
         // Bounded on purpose. The thread this runs on is the one a blocked
         // handler is waiting for, so an unbounded wait here turns one stuck
         // module into a hung host. Everything stays alive and is reported to
@@ -129,6 +153,9 @@ bool BareModuleGlue::stopDispatch(int graceMs)
         return false;
     }
 
+    std::lock_guard<std::mutex> lock(m_dispatchMutex);
+    // Deleting the context drops the posted calls the loop never delivered —
+    // which is safe only because they were answered above.
     delete m_workerContext;
     m_workerContext = nullptr;
     delete m_workerThread;
@@ -196,33 +223,101 @@ QVariant BareModuleGlue::callMethod(const QString& methodName, const QVariantLis
     // would answer Unknown for every caller.
     const std::string callerJson = currentCallerJson();
 
-    if (!m_deferred.load())
+    QString callId;
+    {
+        std::lock_guard<std::mutex> lock(m_dispatchMutex);
+        switch (m_dispatch) {
+        case Dispatch::Inline:
+            // Dispatched below, once the lock is released: the dispatch enters
+            // the module image and the image may call straight back into this
+            // glue. An empty `callId` is what says the call took this branch.
+            break;
+
+        case Dispatch::Retired:
+            // The worker is gone and aboutToUnload has already run, so the
+            // module has been told it is going away. Dispatching inline now
+            // would walk into a quiesced image on the very thread unloading it;
+            // an immediate no is the answer the caller can actually use.
+            return unloadingAnswer(methodName);
+
+        case Dispatch::Deferred:
+            // Hand the dispatch to the worker and answer the pending-call
+            // sentinel. The consumer transport keys on `callId` and waits for
+            // the completion event; see the threading note in the header for
+            // why the delivering thread must be released rather than blocked.
+            callId = QStringLiteral("bc-%1").arg(
+                static_cast<qulonglong>(m_callCounter.fetch_add(1, std::memory_order_relaxed)));
+
+            // REGISTERED BEFORE IT IS POSTED, under the lock stopDispatch takes
+            // to retire: from here the call belongs to exactly one of the
+            // worker and the stop, and neither can fail to see it.
+            m_queued.push_back(QueuedCall{callId, methodName});
+
+            QMetaObject::invokeMethod(
+                m_workerContext,
+                [this, methodName, args, callerJson, callId]() {
+                    if (!claimQueuedCall(callId))
+                        return;    // stopDispatch answered this one already
+                    deliverCompletion(callId, methodName,
+                                      dispatchOnThisThread(methodName, args, callerJson));
+                },
+                Qt::QueuedConnection);
+            break;
+        }
+    }
+
+    if (callId.isEmpty())
         return dispatchOnThisThread(methodName, args, callerJson);
-
-    // Deferred: hand the dispatch to the worker and answer the pending-call
-    // sentinel. The consumer transport keys on `callId` and waits for the
-    // completion event below; see the threading note in the header for why the
-    // delivering thread must be released rather than blocked.
-    const QString callId = QStringLiteral("bc-%1").arg(
-        static_cast<qulonglong>(m_callCounter.fetch_add(1, std::memory_order_relaxed)));
-
-    QMetaObject::invokeMethod(
-        m_workerContext,
-        [this, methodName, args, callerJson, callId]() {
-            const QVariant value = dispatchOnThisThread(methodName, args, callerJson);
-            const EventCallback cb = eventListener();
-            if (cb)
-                cb(logos::callCompleteEvent(), QVariantList{ callId, value });
-            else
-                spdlog::warn("Bare module {}: dispatch of '{}' completed with no event "
-                             "listener attached; the caller will time out",
-                             m_name, methodName.toStdString());
-        },
-        Qt::QueuedConnection);
 
     QVariantMap pending;
     pending[logos::pendingCallKey()] = callId;
     return pending;
+}
+
+bool BareModuleGlue::claimQueuedCall(const QString& callId)
+{
+    std::lock_guard<std::mutex> lock(m_dispatchMutex);
+    for (auto it = m_queued.begin(); it != m_queued.end(); ++it) {
+        if (it->callId == callId) {
+            m_queued.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<BareModuleGlue::QueuedCall> BareModuleGlue::takeQueuedCalls()
+{
+    std::lock_guard<std::mutex> lock(m_dispatchMutex);
+    std::vector<QueuedCall> taken;
+    taken.swap(m_queued);
+    return taken;
+}
+
+void BareModuleGlue::deliverCompletion(const QString& callId, const QString& methodName,
+                                       const QVariant& value)
+{
+    const EventCallback cb = eventListener();
+    if (!cb) {
+        spdlog::warn("Bare module {}: dispatch of '{}' completed with no event "
+                     "listener attached; the caller will time out",
+                     m_name, methodName.toStdString());
+        return;
+    }
+    cb(logos::callCompleteEvent(), QVariantList{ callId, value });
+}
+
+QVariant BareModuleGlue::unloadingAnswer(const QString& methodName) const
+{
+    if (m_resultMethods.contains(methodName)) {
+        LogosResult lr;
+        lr.success = false;
+        lr.error = QString::fromStdString("module " + m_name + " is unloading");
+        return QVariant::fromValue(lr);
+    }
+    // Every other return shape has exactly one failure token in this slot and
+    // it is the invalid QVariant — what a dispatch the image refused answers.
+    return QVariant();
 }
 
 QVariant BareModuleGlue::dispatchOnThisThread(const QString& methodName,
