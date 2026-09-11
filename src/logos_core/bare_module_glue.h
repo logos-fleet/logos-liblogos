@@ -14,7 +14,6 @@
 #include <atomic>
 #include <mutex>
 #include <string>
-#include <utility>
 #include <vector>
 
 class QObject;
@@ -188,13 +187,21 @@ private:
     void deliverCompletion(const QString& callId, const QString& methodName,
                            const QVariant& value);
 
+    // A deferred call that has been posted to the worker and not yet claimed.
+    // The method name rides along because whoever answers the call needs it:
+    // the completion log line, and the return shape unloadingAnswer picks.
+    struct QueuedCall {
+        QString callId;
+        QString methodName;
+    };
+
     // Take `callId` out of m_queued, answering true to exactly ONE caller. That
     // is what makes a completion exactly-once when a stop lands while the
     // worker is part-way through the queue.
     bool claimQueuedCall(const QString& callId);
 
     // Claim everything still queued, in the order it was issued.
-    std::vector<std::pair<QString, QString>> takeQueuedCalls();
+    std::vector<QueuedCall> takeQueuedCalls();
 
     std::string m_name;
     std::string m_version;
@@ -221,10 +228,9 @@ private:
     Dispatch m_dispatch = Dispatch::Inline;
     QThread* m_workerThread = nullptr;
     QObject* m_workerContext = nullptr;
-    // (call id, method name) for every deferred call posted and not yet
-    // claimed — one entry per call in flight, so a linear scan is the right
-    // shape for it.
-    std::vector<std::pair<QString, QString>> m_queued;
+    // Every deferred call posted and not yet claimed — one entry per call in
+    // flight, so a linear scan is the right shape for it.
+    std::vector<QueuedCall> m_queued;
     std::atomic<unsigned long long> m_callCounter{0};
 };
 

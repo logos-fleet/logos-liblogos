@@ -140,8 +140,8 @@ bool BareModuleGlue::stopDispatch(int graceMs)
     // Done whether or not the wait succeeded: on the failure path the worker is
     // still running and may yet reach one of them, and claimQueuedCall is what
     // keeps exactly one of the two answering each call.
-    for (const auto& call : takeQueuedCalls())
-        deliverCompletion(call.first, call.second, unloadingAnswer(call.second));
+    for (const QueuedCall& call : takeQueuedCalls())
+        deliverCompletion(call.callId, call.methodName, unloadingAnswer(call.methodName));
 
     if (!stopped) {
         // Bounded on purpose. The thread this runs on is the one a blocked
@@ -228,6 +228,9 @@ QVariant BareModuleGlue::callMethod(const QString& methodName, const QVariantLis
         std::lock_guard<std::mutex> lock(m_dispatchMutex);
         switch (m_dispatch) {
         case Dispatch::Inline:
+            // Dispatched below, once the lock is released: the dispatch enters
+            // the module image and the image may call straight back into this
+            // glue. An empty `callId` is what says the call took this branch.
             break;
 
         case Dispatch::Retired:
@@ -248,7 +251,7 @@ QVariant BareModuleGlue::callMethod(const QString& methodName, const QVariantLis
             // REGISTERED BEFORE IT IS POSTED, under the lock stopDispatch takes
             // to retire: from here the call belongs to exactly one of the
             // worker and the stop, and neither can fail to see it.
-            m_queued.emplace_back(callId, methodName);
+            m_queued.push_back(QueuedCall{callId, methodName});
 
             QMetaObject::invokeMethod(
                 m_workerContext,
@@ -275,7 +278,7 @@ bool BareModuleGlue::claimQueuedCall(const QString& callId)
 {
     std::lock_guard<std::mutex> lock(m_dispatchMutex);
     for (auto it = m_queued.begin(); it != m_queued.end(); ++it) {
-        if (it->first == callId) {
+        if (it->callId == callId) {
             m_queued.erase(it);
             return true;
         }
@@ -283,10 +286,10 @@ bool BareModuleGlue::claimQueuedCall(const QString& callId)
     return false;
 }
 
-std::vector<std::pair<QString, QString>> BareModuleGlue::takeQueuedCalls()
+std::vector<BareModuleGlue::QueuedCall> BareModuleGlue::takeQueuedCalls()
 {
     std::lock_guard<std::mutex> lock(m_dispatchMutex);
-    std::vector<std::pair<QString, QString>> taken;
+    std::vector<QueuedCall> taken;
     taken.swap(m_queued);
     return taken;
 }
