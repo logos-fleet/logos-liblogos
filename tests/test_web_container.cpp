@@ -201,6 +201,16 @@ public:
         return m_eventsIn;
     }
 
+    // WHAT A PAGE THAT PANICS LOOKS LIKE FROM THE HOST'S SIDE: the Call arrives
+    // and is never answered, because the page is gone by the time it would
+    // have been. Runs on the channel's delivery thread, exactly where a real
+    // backend notices a page has died.
+    void dieOnNextCall(std::function<void()> die)
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        m_dieOnCall = std::move(die);
+    }
+
     int calls() const { return m_calls.load(); }
     int subscribes() const { return m_subscribes.load(); }
     int tokenPushes() const { return m_tokenPushes.load(); }
@@ -233,10 +243,13 @@ private:
 
         if (auto* call = std::get_if<CallMessage>(&msg)) {
             ++m_calls;
+            std::function<void()> die;
             {
                 std::lock_guard<std::mutex> g(m_mu);
                 m_lastCallAuthToken = call->authToken;
+                die.swap(m_dieOnCall);
             }
+            if (die) { die(); return; }
             ResultMessage res;
             res.id = call->id;
             if (call->method == "add" && call->args.size() == 2) {
@@ -313,6 +326,7 @@ private:
     std::string m_lastToken;
     std::string m_lastCallAuthToken;
     std::string m_credential;
+    std::function<void()> m_dieOnCall;
     std::atomic<uint64_t> m_nextId{1};
     std::map<uint64_t, ResultMessage> m_results;
     std::vector<EventMessage> m_eventsIn;
@@ -1132,4 +1146,57 @@ TEST(WebContainerTest, APageThatDiesTakesItsSubscriptionsWithIt)
     EXPECT_TRUE(waitFor([&] { return routes.subscriptionCount() == 0; }, 2000))
         << "a dead page's subscriptions outlived it";
     EXPECT_FALSE(container.hasModule("js_counter"));
+}
+
+// A PAGE THAT DIES IN THE MIDDLE OF A CALL INTO IT.
+//
+// Which is what a panic inside a `web` variant's Wasm host is, and the hardest
+// shape a page death takes. The stack when the backend reports it is:
+//
+//   ...whatever dispatched the call    <- a QtRO node, in a daemon
+//     WebModuleGlue::callMethod
+//       QEventLoop::exec               <- waiting for the page's Result
+//         ...the page dies, and is reported HERE...
+//
+// Destroying the module from in there frees objects that every frame below is
+// still inside. So the container parks it and comes back once the wait has
+// unwound — the module is out and its death announced at once, because that is
+// what callers depend on, and only the destruction waits.
+//
+// Without that, this case is a segfault in the host: a container whose whole
+// purpose is that a module's crash is not the host's.
+TEST(WebContainerTest, APageThatDiesInsideACallIsNotAHostCrash)
+{
+    ensureApp();
+    ViewBackend backend;
+    FakeRoutes routes;
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+    LogosCore::LoadedModuleHandle handle;
+
+    std::atomic<int> announced{0};
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {},
+                                 [&](const std::string&) { ++announced; }, handle));
+
+    backend.page().subscribeToHost("clock_module", "ticked");
+    ASSERT_TRUE(waitFor([&] { return routes.subscriptionCount() == 1; }, 2000));
+
+    LogosCore::WebModuleGlue* glue = container.glueFor("js_counter");
+    ASSERT_NE(glue, nullptr);
+
+    FakeView* view = &backend.view();
+    backend.page().dieOnNextCall([view] { view->kill(); });
+
+    const QVariant answer = glue->callMethod(QStringLiteral("add"), { 1, 2 });
+    EXPECT_FALSE(answer.isValid()) << "a page that died answered anyway";
+
+    // Decided before the call returned, whatever happened to the answer.
+    EXPECT_EQ(announced.load(), 1);
+    EXPECT_FALSE(container.hasModule("js_counter"));
+
+    // And destroyed afterwards, on a turn of the event loop with nothing of the
+    // module's below it. The subscription is the visible end of the router,
+    // which is what the teardown stops.
+    EXPECT_TRUE(waitFor([&] { return routes.subscriptionCount() == 0; }, 5000))
+        << "a page that died inside a call was never torn down";
 }
