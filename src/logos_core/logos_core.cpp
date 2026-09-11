@@ -1,15 +1,48 @@
 #include "logos_core.h"
 #include "logging/logos_log.h"
 #include "module_manager.h"
+#include "module_supervisor.h"
 #include <logos_instance.h>
 #include <process_stats/process_stats.h>
 #include "token_manager.h"
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
+
+namespace {
+
+// THE OPERATOR'S WAY IN WITHOUT A C CALL. `logoscore --container web` is a
+// binary a module developer already has; teaching it a supervision flag would
+// put the same policy in every frontend's argument parser, and a host that
+// states one in code must not have it overwritten by an environment it did not
+// choose. So this is read ONCE, at start, and only when no policy has been set:
+// LOGOS_SUPERVISION = max[,windowMs[,backoffMs]].
+void applySupervisionFromEnvironment() {
+    if (LogosCore::ModuleSupervisor::instance().policy().maxRestarts > 0) return;
+
+    const char* value = std::getenv("LOGOS_SUPERVISION");
+    if (!value || !*value) return;
+
+    const LogosCore::SupervisionPolicy policy =
+        LogosCore::ModuleSupervisor::policyFromEnvironment(value);
+    if (policy.maxRestarts <= 0) {
+        logos::logger("core").warn(
+            "LOGOS_SUPERVISION='{}' is not a budget I can read "
+            "(max[,windowMs[,backoffMs]]); leaving supervision off", value);
+        return;
+    }
+    logos::logger("core").info(
+        "Supervision: a module that dies is loaded again, up to {} times in {} ms, "
+        "{} ms apart (LOGOS_SUPERVISION)",
+        policy.maxRestarts, policy.window.count(), policy.backoff.count());
+    LogosCore::ModuleSupervisor::instance().setPolicy(policy);
+}
+
+} // namespace
 
 // === C API Implementation (Thin Wrappers) ===
 
@@ -24,6 +57,7 @@ void logos_core_add_modules_dir(const char* modules_dir) {
 
 void logos_core_start() {
     logos::initLogging();
+    applySupervisionFromEnvironment();
     LogosInstance::id();
     // Before anything dials: this thread becomes the owner of every client.
     ModuleManager::anchorCoreApi();
@@ -198,6 +232,14 @@ void logos_core_set_container_policy(const char* policy) {
     // NULL/"" resets to "auto" (see header) — like the access policy, this
     // does not abort on NULL.
     ModuleManager::setContainerPolicy(policy ? std::string(policy) : std::string{});
+}
+
+void logos_core_set_supervision_policy(int max_restarts, int window_ms, int backoff_ms) {
+    LogosCore::SupervisionPolicy policy;
+    policy.maxRestarts = max_restarts;
+    if (window_ms > 0) policy.window = std::chrono::milliseconds(window_ms);
+    if (backoff_ms >= 0) policy.backoff = std::chrono::milliseconds(backoff_ms);
+    LogosCore::ModuleSupervisor::instance().setPolicy(policy);
 }
 
 void logos_core_refresh_modules()
