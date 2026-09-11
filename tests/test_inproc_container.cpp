@@ -33,6 +33,7 @@
 #include <QStringList>
 #include <QVariantMap>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -756,4 +757,158 @@ TEST(TwoBareModulesTest, AnIdentityCannotPresentACredentialIssuedToAnother)
     // un-isolated caller in this image reads.
     EXPECT_TRUE(TokenManager::instance().getToken(target).isEmpty())
         << "an isolated identity's token reached the host's ambient ring";
+}
+
+// ── a call that races the unload ────────────────────────────────────────────
+//
+// The sentinel is a PROMISE: callMethod answered "the result will arrive on the
+// event channel under this id", and the consumer transport then waits for that
+// id — for its whole call timeout if nothing ever comes. So the one thing
+// teardown may not do is take the promise's delivery mechanism away between the
+// promise and the delivery. A consumer calling a Bare module while the host
+// unloads it is not exotic: unload is asynchronous with every other module's
+// traffic by construction.
+
+TEST(BareModuleGlueUnloadRaceTest, EveryCallQueuedBeforeTheStopIsStillAnswered)
+{
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    ensureQtApp();
+
+    // WHY A STALL, AND NOT JUST A TIGHT LOOP. QThread::quit() interrupts the
+    // worker's event dispatcher, so the calls already POSTED behind the one in
+    // flight are never delivered — measured here as 8 of 9 lost. That, not the
+    // few instructions between "this glue defers" and the posting that follows,
+    // is the wide half of the race, and it needs a dispatch to be genuinely in
+    // flight when the stop lands. `stall` is the fixture method that puts one
+    // there.
+    constexpr int kRounds = 10;
+    constexpr int kBurst = 8;
+
+    for (int round = 0; round < kRounds; ++round) {
+        LogosCore::BareModuleAbi abi;
+        std::string error;
+        ASSERT_TRUE(LogosCore::openBareModule(bareModulePath(), abi, &error)) << error;
+
+        {
+            LogosCore::BareModuleGlue glue("bare_fixture", "1.0.0", abi);
+            CompletionCollector completions;
+            glue.setEventListener(completions.listener());
+            glue.enableDeferredDispatch();
+
+            std::mutex issuedMutex;
+            QStringList issued;
+
+            auto issue = [&](const QString& method, const QVariantList& args) {
+                QString callId;
+                const QVariant answer = glue.callMethod(method, args);
+                // A call that arrives after the stop is refused outright; only
+                // a SENTINEL is a promise, and only a promise owes a completion.
+                if (logos::isPendingCallSentinel(answer, &callId)) {
+                    std::lock_guard<std::mutex> lock(issuedMutex);
+                    issued << callId;
+                }
+            };
+
+            auto issuedSoFar = [&] {
+                std::lock_guard<std::mutex> lock(issuedMutex);
+                return issued.size();
+            };
+
+            issue(QStringLiteral("stall"), QVariantList{120});
+
+            // The burst is issued from a thread of its own, because that is the
+            // shape of the race: the thread tearing a module down is never the
+            // thread calling it.
+            std::thread caller([&] {
+                for (int i = 0; i < kBurst; ++i)
+                    issue(QStringLiteral("add"), QVariantList{1, 1});
+            });
+
+            // Stop once a few are definitely queued behind the stall; the rest
+            // of the burst is still being issued while this runs, which is the
+            // concurrent half.
+            while (issuedSoFar() < 3)
+                std::this_thread::yield();
+            // Grace enough for the stall to finish, so this is never the
+            // "worker still inside the image" path.
+            const bool stopped = glue.stopDispatch(5000);
+            caller.join();
+            EXPECT_TRUE(stopped) << "round " << round;
+
+            QStringList expected;
+            {
+                std::lock_guard<std::mutex> lock(issuedMutex);
+                expected = issued;
+            }
+            ASSERT_GT(expected.size(), 1) << "round " << round
+                << ": nothing was queued behind the stall, so nothing raced";
+
+            // Two seconds is already generous: every one of these either ran or
+            // was answered before stopDispatch returned. The failure this
+            // guards against is a caller burning its whole 10s call timeout
+            // waiting for a completion that is never coming.
+            ASSERT_TRUE(completions.waitFor(static_cast<int>(expected.size()),
+                                            std::chrono::seconds(2)))
+                << "round " << round << ": " << completions.ids().size() << " of "
+                << expected.size() << " calls were answered; the rest are stranded "
+                   "sentinels with no completion";
+            // Same ids, same order, no duplicates — a call answered twice is as
+            // wrong as one never answered.
+            EXPECT_EQ(completions.ids(), expected) << "round " << round;
+        }
+
+        LogosCore::closeBareModule(abi);
+    }
+}
+
+TEST(BareModuleGlueUnloadRaceTest, ACallThatArrivesAfterTheStopIsRefusedNotDispatched)
+{
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    ensureQtApp();
+
+    LogosCore::BareModuleAbi abi;
+    std::string error;
+    ASSERT_TRUE(LogosCore::openBareModule(bareModulePath(), abi, &error)) << error;
+
+    // The fixture's counter is a module global and the image is shared with
+    // every other test in this process, so the reading is RELATIVE. Each probe
+    // is its own scope: two live glues over one image would fight over the
+    // module's single emit callback.
+    auto readTotal = [&] {
+        LogosCore::BareModuleGlue probe("bare_probe", "1.0.0", abi);
+        return probe.callMethod(QStringLiteral("total"), {}).toLongLong();
+    };
+
+    const long long before = readTotal();
+
+    {
+        LogosCore::BareModuleGlue glue("bare_fixture", "1.0.0", abi);
+        glue.enableDeferredDispatch();
+        ASSERT_TRUE(glue.stopDispatch(5000));
+
+        // aboutToUnload has already run by the time the container stops the
+        // worker, so the module has been told it is going away. Answering the
+        // caller's call by walking into that image anyway is the wrong half of
+        // the bargain: what the caller needs is a prompt NO.
+        QString callId;
+        const QVariant refused = glue.callMethod(QStringLiteral("bump"), QVariantList{7});
+        EXPECT_FALSE(logos::isPendingCallSentinel(refused, &callId))
+            << "a retired glue promised a completion it has no worker to deliver";
+        EXPECT_FALSE(refused.isValid())
+            << "a refused void call must answer this slot's failure token";
+
+        // A `result` method can say WHY, and it is the shape its callers
+        // already unpack.
+        const LogosResult described =
+            glue.callMethod(QStringLiteral("describe"), {}).value<LogosResult>();
+        EXPECT_FALSE(described.success);
+        EXPECT_TRUE(described.error.toString().contains(QStringLiteral("bare_fixture")))
+            << "the error should name the module that is going away; got: "
+            << described.error.toString().toStdString();
+    }
+
+    EXPECT_EQ(readTotal(), before)
+        << "the refused bump reached the module image anyway";
+
+    LogosCore::closeBareModule(abi);
 }

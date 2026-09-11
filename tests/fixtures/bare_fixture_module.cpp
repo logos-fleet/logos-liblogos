@@ -13,9 +13,11 @@
 // the distinctions the GENERATED Qt glue is handed as compile-time literals and
 // that BareModuleGlue has to rediscover from logos_module_get_methods().
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 
 // Version macros only — this header declares the lp_* C ABI and includes
 // nothing; the fixture calls none of it and links nothing.
@@ -92,6 +94,8 @@ BARE_FIXTURE_EXPORT char* logos_module_get_methods(void)
       {"name":"context","signature":"context()","returnType":"tstr","isInvokable":true},
       {"name":"caller","signature":"caller()","returnType":"tstr","isInvokable":true},
       {"name":"inboundCaller","signature":"inboundCaller()","returnType":"tstr","isInvokable":true},
+      {"name":"stall","signature":"stall(uint)","returnType":"uint","isInvokable":true,
+       "parameters":[{"type":"uint","name":"ms"}]},
       {"name":"tick","signature":"tick(uint)","returnType":"void","isInvokable":true},
       {"type":"event","name":"ticked","signature":"ticked(uint)",
        "parameters":[{"type":"uint","name":"value"}]}
@@ -123,6 +127,14 @@ BARE_FIXTURE_EXPORT char* logos_module_dispatch(const char* method, const char* 
         return dup("\"" + quoteSwapped(g_lastCaller) + "\"");
     if (m == "inboundCaller")
         return dup("\"" + g_lastInboundCaller + "\"");
+    if (m == "stall") {
+        // The one thing a unit test cannot fake about a dispatch: that it is
+        // still INSIDE the module when something else happens. Used to put a
+        // call in flight so a burst can be queued behind it.
+        const long long ms = firstInt(argsJson, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        return dup(std::to_string(ms));
+    }
     if (m == "tick") {
         const long long value = firstInt(argsJson, 0);
         if (g_emit)
