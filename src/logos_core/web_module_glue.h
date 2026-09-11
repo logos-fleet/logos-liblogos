@@ -5,19 +5,17 @@
 
 #include <QJsonArray>
 #include <QPointer>
-
-class QEventLoop;
 #include <QString>
-
-#include <atomic>
 #include <QVariant>
 #include <QVariantList>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
 
 class LogosObject;
+class QEventLoop;
 
 namespace LogosCore {
 

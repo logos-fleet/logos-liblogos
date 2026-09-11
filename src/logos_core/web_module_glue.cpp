@@ -11,6 +11,7 @@
 #include <QThread>
 #include <QTimer>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -121,9 +122,8 @@ QVariant WebModuleGlue::awaitPage(const QString& methodName, const QVariantList&
         {
             {
                 std::lock_guard<std::mutex> lock(glue.m_waitMutex);
-                for (auto it = glue.m_waits.begin(); it != glue.m_waits.end(); ++it) {
-                    if (*it == loop) { glue.m_waits.erase(it); break; }
-                }
+                const auto it = std::find(glue.m_waits.begin(), glue.m_waits.end(), loop);
+                if (it != glue.m_waits.end()) glue.m_waits.erase(it);
             }
             --glue.m_awaiting;
         }

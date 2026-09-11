@@ -163,7 +163,7 @@ private:
 
     // Everything still parked, waited on or not. The destructor's, because the
     // container is going away and there is no later.
-    void sweepRetiredNow();
+    void tearDownAllRetired();
 
     mutable std::mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<Instance>> m_modules;

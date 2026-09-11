@@ -1,13 +1,10 @@
 #include "module_supervisor.h"
 
-#include <spdlog/spdlog.h>
-
 #include <QCoreApplication>
 #include <QMetaObject>
 #include <QTimer>
 
 #include <algorithm>
-#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -155,11 +152,10 @@ SupervisionPolicy ModuleSupervisor::policyFromEnvironment(const char* value)
     // supervision off. The alternative is inventing a budget for a typo.
     std::vector<long> fields;
     const std::string text(value);
-    std::size_t at = 0;
-    while (at <= text.size()) {
+    for (std::size_t at = 0; at <= text.size();) {
         const std::size_t comma = text.find(',', at);
-        const std::string field =
-            text.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        const std::size_t end = comma == std::string::npos ? text.size() : comma;
+        const std::string field = text.substr(at, end - at);
         if (field.empty()) return off;
         try {
             std::size_t used = 0;
@@ -169,8 +165,9 @@ SupervisionPolicy ModuleSupervisor::policyFromEnvironment(const char* value)
         } catch (...) {
             return off;
         }
-        if (comma == std::string::npos) break;
-        at = comma + 1;
+        // Past the end when the last field had no comma after it, which is what
+        // ends the loop.
+        at = end + 1;
     }
 
     if (fields.empty() || fields.size() > 3) return off;

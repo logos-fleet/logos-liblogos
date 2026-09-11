@@ -1179,9 +1179,6 @@ namespace {
         return true;
     }
 
-    // Callers hold fleetMutex(): shared for a single unload, exclusive for the
-    // cascade, which needs one span so a load cannot interleave between the
-    // dependents and the target. Takes `name`'s lock like the load path does.
     // The load a SUPERVISOR asks for, which differs from the operator's
     // ModuleManager::loadModule in exactly one way: it does not clear the
     // module's death history. Clearing it there is what gives an operator who
@@ -1238,6 +1235,9 @@ namespace {
         });
     }
 
+    // Callers hold fleetMutex(): shared for a single unload, exclusive for the
+    // cascade, which needs one span so a load cannot interleave between the
+    // dependents and the target. Takes `name`'s lock like the load path does.
     bool unloadModuleInternal(const std::string& name) {
         std::lock_guard<std::mutex> moduleGuard(moduleMutex(name));
 

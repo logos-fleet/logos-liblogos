@@ -68,7 +68,7 @@ WebContainer::~WebContainer()
     terminateAll();
     // Anything still parked has no later to be swept in. The token goes with
     // this object, so a sweep already armed finds it expired and does nothing.
-    sweepRetiredNow();
+    tearDownAllRetired();
 }
 
 void WebContainer::setHostApi(LogosAPI* hostApi)
@@ -365,18 +365,20 @@ void WebContainer::retire(const std::string& name, Retirement why)
 
     if (why == Retirement::PageLost) {
         spdlog::warn("Web module {} lost its page", name);
-        // USUALLY HERE, AND THAT MATTERS. Destroying the module's LogosAPI is
-        // what unpublishes its name, and a module loaded again takes the same
-        // QtRO address — so an old node still standing when a new one binds is
-        // a module that answers nothing. The one case that cannot be done here
-        // is the one below.
         // END ANY WAIT FIRST. A call that was in flight when the page died has
         // no answer coming, and until it gives up nothing about this module can
         // be destroyed — including the LogosAPI that still holds the name a
         // reload needs.
-        if (instance->glue) instance->glue->abandonPendingCalls();
+        WebModuleGlue* glue = instance->glue.get();
+        if (glue) glue->abandonPendingCalls();
 
-        if (instance->glue && instance->glue->isAwaitingPage())
+        // TORN DOWN HERE UNLESS THAT WAIT IS STILL UNWINDING, AND THAT MATTERS.
+        // Destroying the module's LogosAPI is what unpublishes its name, and a
+        // module loaded again takes the same QtRO address — so an old node
+        // still standing when a new one binds is a module that answers nothing.
+        // Parking it is the one case that cannot be settled here; see
+        // deferTearDown.
+        if (glue && glue->isAwaitingPage())
             deferTearDown(std::move(instance));
         else
             tearDown(*instance);
@@ -492,7 +494,7 @@ void WebContainer::sweepRetired()
 
 // Everything still parked, whatever it is doing. The last word, and the only
 // caller is the destructor: the container is going away, so there is no later.
-void WebContainer::sweepRetiredNow()
+void WebContainer::tearDownAllRetired()
 {
     std::vector<std::unique_ptr<Instance>> retired;
     {
