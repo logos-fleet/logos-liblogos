@@ -25,6 +25,12 @@ add_executable(logos_core_tests
     test_load_verdict.cpp
     test_load_concurrency.cpp
     test_inproc_container.cpp
+    # The step test_inproc_container.cpp leaves out on purpose: a consumer
+    # calling a module the container has PUBLISHED, and therefore deferred.
+    # Separate file because it is the opposite of hermetic — it needs a host
+    # LogosAPI, Local mode and a token — and because the property it pins is the
+    # CALL PATH rather than the container.
+    test_inproc_consumer_call.cpp
     test_web_container.cpp
     test_embedded_bare_module.cpp
 )
