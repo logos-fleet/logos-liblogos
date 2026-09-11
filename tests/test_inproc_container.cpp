@@ -17,6 +17,7 @@
 
 #include "bare_module_abi.h"
 #include "bare_module_glue.h"
+#include "bare_module_fixture.h"
 #include "inproc_container.h"
 #include "bare_module_loader.h"
 #include "composite_module_loader.h"
@@ -42,24 +43,9 @@
 #include <thread>
 #include <vector>
 
-namespace {
-
-std::string bareModulePath()
-{
-    const char* p = std::getenv("TEST_BARE_MODULE");
-    return p ? p : std::string();
-}
-
-LogosCore::ModuleDescriptor bareDescriptor(const std::string& name = "bare_fixture")
-{
-    LogosCore::ModuleDescriptor desc;
-    desc.name = name;
-    desc.path = bareModulePath();
-    desc.format = "bare";
-    return desc;
-}
-
-} // namespace
+using LogosTests::bareDescriptor;
+using LogosTests::bareModulePath;
+using LogosTests::ensureQtApp;
 
 // ── the ABI resolver ────────────────────────────────────────────────────────
 
@@ -495,24 +481,6 @@ std::string twinModulePath()
 {
     const char* p = std::getenv("TEST_BARE_MODULE_TWIN");
     return p ? p : std::string();
-}
-
-// The deferred-dispatch tests need a Qt event loop on the worker thread, and
-// QThread::exec() refuses to run one without a QCoreApplication ("QEventLoop:
-// Cannot be used without QCoreApplication"). Every real host of this container
-// has one long before a module loads; this suite has none because nothing else
-// in it needs one. Built once, on the main thread, and deliberately never
-// destroyed — the tests that follow are the only users and the process is about
-// to end.
-void ensureQtApp()
-{
-    if (QCoreApplication::instance())
-        return;
-    static int argc = 1;
-    static char arg0[] = "logos_core_tests";
-    static char* argv[] = {arg0, nullptr};
-    static QCoreApplication* app = new QCoreApplication(argc, argv);
-    (void)app;
 }
 
 // The rendezvous both deferred-dispatch tests need: a completion is delivered

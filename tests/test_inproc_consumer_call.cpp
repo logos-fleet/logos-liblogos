@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 
 #include "bare_module_abi.h"
+#include "bare_module_fixture.h"
 #include "inproc_container.h"
 #include "module_registry.h"
 
@@ -31,45 +32,18 @@
 #include <logos_mode.h>
 #include <token_manager.h>
 
-#include <QCoreApplication>
 #include <QString>
 #include <QVariant>
 #include <QVariantList>
 
-#include <cstdlib>
 #include <memory>
 #include <string>
 
 namespace {
 
-std::string bareModulePath()
-{
-    const char* p = std::getenv("TEST_BARE_MODULE");
-    return p ? p : std::string();
-}
-
-LogosCore::ModuleDescriptor bareDescriptor(const std::string& name)
-{
-    LogosCore::ModuleDescriptor desc;
-    desc.name = name;
-    desc.path = bareModulePath();
-    desc.format = "bare";
-    return desc;
-}
-
-// The container publishes through a LogosAPI and the glue's worker runs a Qt
-// event loop, so this suite needs a QCoreApplication. Built once and never
-// destroyed — the process is about to end and nothing else here wants one.
-void ensureQtApp()
-{
-    if (QCoreApplication::instance())
-        return;
-    static int argc = 1;
-    static char arg0[] = "logos_core_tests";
-    static char* argv[] = {arg0, nullptr};
-    static QCoreApplication* app = new QCoreApplication(argc, argv);
-    (void)app;
-}
+using LogosTests::bareDescriptor;
+using LogosTests::bareModulePath;
+using LogosTests::ensureQtApp;
 
 // The mode is process-global, so it is restored on the way out: every other
 // test in this binary expects Remote.
