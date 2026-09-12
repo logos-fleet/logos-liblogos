@@ -887,7 +887,8 @@ namespace {
 // this file drives ModuleRegistry directly rather than through the C API.
 void plantPackage(const std::filesystem::path& modulesDir,
                   const std::string& name,
-                  const std::string& mainFile)
+                  const std::string& mainFile,
+                  const std::string& type = "core")
 {
     const std::filesystem::path dir = modulesDir / name;
     std::filesystem::create_directories(dir);
@@ -895,7 +896,7 @@ void plantPackage(const std::filesystem::path& modulesDir,
     const nlohmann::json manifest{
         {"name", name},
         {"version", "1.0.0"},
-        {"type", "core"},
+        {"type", type},
         {"main", mainFile},
         {"description", "a planted package"},
     };
@@ -971,6 +972,33 @@ TEST(WebDiscoveryTest, TheExtensionIsMatchedCaseInsensitivelyAndHtmCounts)
     ScopedModulesDir mixed;
     plantPackage(mixed.path(), "mixed_page", "Index.Htm");
     EXPECT_EQ(discoveredFormat(mixed, "mixed_page"), "web");
+}
+
+TEST(WebDiscoveryTest, AUiQmlPackageWhoseEntryIsAPageIsAWebModule)
+{
+    // A `ui_qml` module's `web` VARIANT is both halves of one package: its page
+    // draws the view AND serves the module over the web transport, so the
+    // container publishes it under its own identity like any other provider
+    // (ADR 0004). Scanned as a `core` module it was invisible — the package
+    // manager's module scan accepts `type: "core"` and nothing else — and a
+    // module nothing discovers is a module nothing can load.
+    ScopedModulesDir dir;
+    plantPackage(dir.path(), "web_counter", "index.html", "ui_qml");
+
+    EXPECT_EQ(discoveredFormat(dir, "web_counter"), "web");
+}
+
+TEST(WebDiscoveryTest, AUiQmlPackageWhoseEntryIsAPluginIsNotAModuleHere)
+{
+    // The other half of the rule above, and the one that keeps it narrow: the
+    // ORDINARY `ui_qml` artifact — a QML document plus a Qt backend plugin — is
+    // a UI plugin loaded in the shell's own process, not a module the core
+    // loads. Widening discovery to every non-`core` package would have made
+    // every installed app a module.
+    ScopedModulesDir dir;
+    plantPackage(dir.path(), "counter", "counter_plugin.dylib", "ui_qml");
+
+    EXPECT_EQ(discoveredFormat(dir, "counter"), "<absent>");
 }
 
 TEST(WebDiscoveryTest, ABareImageIsStillBareAndAPluginIsStillNeitherArm)

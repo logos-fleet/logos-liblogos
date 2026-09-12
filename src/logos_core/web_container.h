@@ -89,9 +89,24 @@ public:
     // its own", never "unknown".
     static constexpr int64_t kNoPid = -1;
 
-    // How long a view is given to load its page and publish its module before
-    // awaitLoad gives up, when the caller names no shorter deadline.
-    static constexpr int kPageReadyTimeoutMs = 30000;
+    // How long a view is given to load its page and publish its module.
+    //
+    // A FLOOR, NOT A DEFAULT: awaitLoad takes the larger of this and what the
+    // caller asked for. ModuleManager asks for 10 s, which is calibrated for a
+    // subprocess that dlopens a plugin and prints a line; a page is a browser
+    // cold-starting a WebAssembly image, and a `ui_qml` `web` variant brings up
+    // the app's 26 MB bundled QML runtime AND its own backend image before its
+    // SDK can publish anything. On a machine with no GPU that is tens of
+    // seconds with nothing wrong.
+    //
+    // AND IT IS A MULTIPLE OF THE CONTRACT QUERY'S OWN TIMEOUT, which is the
+    // part that is not obvious. awaitLoad polls by ASKING the page for its
+    // interface, and a page that is not serving yet does not answer "no" — it
+    // does not answer at all, so the query costs WebModuleGlue::kCallTimeoutMs
+    // before the poll loop gets its turn back. A budget of one such timeout
+    // therefore buys exactly ONE attempt, made before the page could possibly
+    // be ready. This buys four.
+    static constexpr int kPageReadyTimeoutMs = 120000;
 
     // The host's LogosAPI, used as the trusted channel that publishes each web
     // module under its own identity. Injected rather than constructed here so
