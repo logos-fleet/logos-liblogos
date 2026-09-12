@@ -166,7 +166,22 @@ void ModuleRegistry::discoverInstalledModules() {
         }
     }
 
-    std::vector<InstalledPackage> modules = pm.getInstalledModules();
+    // EVERY PACKAGE IN THE MODULES DIRECTORIES, not only the `core` ones, and
+    // the loop below is what keeps that from meaning anything new.
+    //
+    // getInstalledModules() accepts `type: "core"` and nothing else, which was
+    // the whole truth until a `ui_qml` module grew a `web` variant. That
+    // artifact is BOTH halves at once: its page draws the view AND serves the
+    // module over the web transport, so the container publishes it under its
+    // own identity like any other provider (ADR 0004, ADR 0005). Scanned as a
+    // `core` module it is invisible; scanned as a UI plugin it is not a module.
+    // It is one package and it is both, so discovery has to admit it.
+    //
+    // NOTHING ELSE CHANGES. A non-`core` package is admitted only when its
+    // resolved `main` is a page — see the loop — so a `ui`/`ui_qml` package
+    // whose main is a plugin library is skipped here exactly as it was before,
+    // and a modules directory holding only `core` packages scans identically.
+    std::vector<InstalledPackage> modules = pm.getInstalledPackages();
 
     // Collect names seen in this scan. Used after the upsert loop to prune
     // entries for modules whose files disappeared (typical path: the user
@@ -184,6 +199,13 @@ void ModuleRegistry::discoverInstalledModules() {
         // self-asserted name embedded in the plugin binary. processModuleInternal
         // refuses the plugin if its embedded metadata name disagrees, so a
         // package cannot register under a privileged name it doesn't own.
+        // A package that is not a `core` module is a module here only if it is
+        // a page. See the getInstalledPackages() call above for why the set
+        // widened at all.
+        const bool isCore = mod.type.empty() || mod.type == "core";
+        if (!isCore && !looksLikeWebModule(mod.mainFilePath))
+            continue;
+
         std::string moduleName;
         if (looksLikeBareModule(mod.mainFilePath))
             moduleName = processManifestModuleInternal(mod, "bare", "Bare module");

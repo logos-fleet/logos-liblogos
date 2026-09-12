@@ -19,6 +19,8 @@
 #include <QTimer>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -56,8 +58,13 @@ namespace {
 // the Native container's answer for the same question.
 constexpr const char* kDefaultModuleVersion = "1.0.0";
 
-// How often awaitLoad re-asks a page that is not serving yet.
-constexpr int kPageReadyPollMs = 50;
+// How often awaitLoad turns the event loop while it is waiting on a page.
+constexpr int kPageReadyPollMs = 10;
+
+// What a page that never answered the contract query is reported as.
+constexpr const char* kNeverPublished =
+    "the page never published a module: it answered the contract query with "
+    "nothing before the deadline";
 
 } // namespace
 
@@ -303,9 +310,21 @@ LoadOutcome WebContainer::awaitLoad(const std::string& name,
         glue = it->second->glue.get();
     }
 
-    const auto budget = timeout.count() > 0
-        ? timeout
-        : std::chrono::milliseconds(kPageReadyTimeoutMs);
+    // AT LEAST kPageReadyTimeoutMs, whatever the caller asked for.
+    //
+    // The caller is ModuleManager, whose one deadline (10 s) is calibrated for
+    // a subprocess that dlopens a plugin and prints a line. A page is a browser
+    // doing a cold start: it fetches its documents, instantiates the app's
+    // bundled Qt-wasm QML runtime -- 26 MB of WebAssembly -- and, for a `ui_qml`
+    // `web` variant, a second image beside it, all before its SDK can publish
+    // anything. On a machine with no GPU that is tens of seconds and nothing is
+    // wrong. Failing at 10 s reports "the page never published a module" about
+    // a page that was still starting, and then destroys it.
+    //
+    // The container is the only thing that knows which kind of load this is, so
+    // it raises the floor rather than asking every caller to know. A caller
+    // that wants LONGER still gets what it asked for.
+    const auto budget = std::max(timeout, std::chrono::milliseconds(kPageReadyTimeoutMs));
     const auto deadline = std::chrono::steady_clock::now() + budget;
 
     // Polled rather than pushed, because the seam a page reports through IS the
@@ -316,25 +335,64 @@ LoadOutcome WebContainer::awaitLoad(const std::string& name,
     QCoreApplication* app = QCoreApplication::instance();
     const bool onQtMainThread = app && QThread::currentThread() == app->thread();
 
-    do {
+    // OFF THE QT MAIN THREAD the query is an ordinary blocking call and nothing
+    // is being starved, so the loop is the obvious one.
+    if (!onQtMainThread) {
+        do {
+            if (!hasModule(name))
+                return { LoadVerdict::Failed, "the page went away while it was loading" };
+            if (glue->pageIsServing())
+                return { LoadVerdict::Loaded, {} };
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPageReadyPollMs));
+        } while (std::chrono::steady_clock::now() < deadline);
+        return { LoadVerdict::Failed, kNeverPublished };
+    }
+
+    // ON THE QT MAIN THREAD THE QUERY GOES TO A WORKER, and this thread pumps.
+    //
+    // THE PAGE RUNS ON THIS THREAD. In a shell the webview is in this process
+    // and its renderer talks to it over the Qt event loop; a page cannot fetch
+    // a document, instantiate a WebAssembly image or run a line of JavaScript
+    // while this thread is inside a blocking call. And the contract query IS a
+    // blocking call — a page that is not serving yet does not answer "no", it
+    // does not answer at all, so it costs WebModuleGlue::kCallTimeoutMs of
+    // silence. Asking it from here was therefore a wait for something this very
+    // wait prevented: the page made no progress, every attempt timed out, and
+    // the container reported "it never published a module" about a page that
+    // had not been allowed to start.
+    //
+    // So the query runs on a worker (off the Qt thread it is an ordinary
+    // blocking call, which is exactly what WebModuleGlue::awaitPage documents)
+    // and this thread does what it must: turn the event loop, which is also
+    // what lets a page CALL OUT while it starts up — asking capability_module
+    // for what it needs before it publishes — since that dispatch lands here.
+    //
+    // JOINED, NEVER DETACHED, on every exit path. The probe holds the glue, and
+    // the glue is destroyed by the teardown that follows a failed verdict; a
+    // detached probe would outlive it by up to a full call timeout and write
+    // into it.
+    while (std::chrono::steady_clock::now() < deadline) {
         if (!hasModule(name))
             return { LoadVerdict::Failed, "the page went away while it was loading" };
-        if (glue->pageIsServing())
-            return { LoadVerdict::Loaded, {} };
-        // PUMPED, not slept, when this is the Qt main thread. A page may call
-        // OUT while it is starting up — asking capability_module for what it
-        // needs before it publishes — and that call is routed on this thread
-        // (WebCallRouter::dispatch). Sleeping the whole budget away would make
-        // a page that waits for its own first call look like a page that never
-        // published a module.
-        if (onQtMainThread)
-            QCoreApplication::processEvents(QEventLoop::AllEvents);
-        std::this_thread::sleep_for(std::chrono::milliseconds(kPageReadyPollMs));
-    } while (std::chrono::steady_clock::now() < deadline);
 
-    return { LoadVerdict::Failed,
-             "the page never published a module: it answered the contract query "
-             "with nothing before the deadline" };
+        std::atomic<bool> done{false};
+        bool serving = false;
+        std::thread probe([glue, &done, &serving] {
+            serving = glue->pageIsServing();
+            done.store(true, std::memory_order_release);
+        });
+
+        while (!done.load(std::memory_order_acquire)) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents);
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPageReadyPollMs));
+        }
+        probe.join();
+
+        if (serving)
+            return { LoadVerdict::Loaded, {} };
+    }
+
+    return { LoadVerdict::Failed, kNeverPublished };
 }
 
 // Lift a module out of the map, or nullptr when it is not there.
