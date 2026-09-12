@@ -10,9 +10,9 @@
 //
 // It answers a contract with one of each return shape the glue must classify at
 // runtime (`uint`, `void`, `result` under both of its published spellings) plus
-// an event, because those are exactly
-// the distinctions the GENERATED Qt glue is handed as compile-time literals and
-// that BareModuleGlue has to rediscover from logos_module_get_methods().
+// an event, because those are exactly the distinctions the GENERATED Qt glue is
+// handed as compile-time literals and that BareModuleGlue has to rediscover
+// from logos_module_get_methods().
 
 #include <chrono>
 #include <cstdlib>
