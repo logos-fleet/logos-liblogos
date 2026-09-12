@@ -181,6 +181,32 @@ TEST_F(BareModuleGlueTest, AResultMethodRematerialisesLogosResult)
     EXPECT_EQ(r.value.toMap().value("name").toString(), QStringLiteral("bare_fixture"));
 }
 
+// The same classification, under the OTHER spelling of the same return type.
+//
+// `returnType` is written by whichever generator produced the module, and the
+// two in this tree disagree: logos-cpp-sdk publishes the LIDL text (`result`,
+// lidlTypeToPublishedName), and logos-rust-sdk publishes the Qt type name
+// (`LogosResult`, qt_type_name). A glue that knows only the first classifies
+// every `result` method of every RUST module as an ordinary value, and the
+// module's {success, value, error} map reaches the caller UNOPENED -- so a
+// failure arrives as a successful call returning a map, and the error channel
+// the contract promises is silently gone.
+//
+// Measured on the iOS smoke host (logos-workspace#10): chat_module's `init`
+// failed and the caller was told it had succeeded, because the map was never
+// examined. What the caller has to see is the failure.
+TEST_F(BareModuleGlueTest, TheQtSpellingOfAResultIsTheSameResult)
+{
+    const QVariant v = m_glue->callMethod(QStringLiteral("describeQt"), {});
+    ASSERT_TRUE(v.canConvert<LogosResult>())
+        << "a method published with returnType `LogosResult` -- what the Rust "
+           "SDK emits for a `result` -- must be classified the same as one "
+           "published as `result`";
+    const LogosResult r = v.value<LogosResult>();
+    EXPECT_FALSE(r.success);
+    EXPECT_EQ(r.error.toString(), QStringLiteral("describeQt says no"));
+}
+
 TEST_F(BareModuleGlueTest, AnUnknownMethodIsAnInvalidQVariant)
 {
     EXPECT_FALSE(m_glue->callMethod(QStringLiteral("no_such_method"), {}).isValid());
