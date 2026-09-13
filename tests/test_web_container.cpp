@@ -601,6 +601,43 @@ TEST(WebContainerTest, RelaysACallToThePageAndAnswersItsResult)
     container.terminateAll();
 }
 
+// A WEB MODULE'S DATA HAS TO OUTLIVE ITS PAGE, and the backend is the only
+// thing that can arrange it: the module's own filesystem is the image's, so
+// what makes a write durable is the browser's storage for the page. The
+// container therefore has to HAND the backend the module's persistence
+// directory -- and a container that keeps it to itself produces the quietest
+// failure this container has, since every write still succeeds and reads back
+// for the life of the page.
+TEST(WebContainerTest, TheViewIsToldWhereThisModulesDataLives)
+{
+    ViewBackend backend;
+    LogosCore::WebContainer container;
+    LogosCore::LoadedModuleHandle handle;
+
+    LogosCore::ModuleDescriptor desc = webDescriptor();
+    desc.instancePersistencePath = "/data/js_counter/7f3a";
+    ASSERT_TRUE(container.launch(desc, "", {}, {}, handle));
+
+    EXPECT_EQ(backend.lastRequest().storagePath, "/data/js_counter/7f3a");
+
+    container.terminateAll();
+}
+
+// ...and empty when the host has none, which is a host started without a
+// persistence base rather than an error. The backend decides what to do with
+// that; what it must not be given is a plausible-looking wrong path.
+TEST(WebContainerTest, NoPersistenceBaseMeansNoStoragePath)
+{
+    ViewBackend backend;
+    LogosCore::WebContainer container;
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    EXPECT_TRUE(backend.lastRequest().storagePath.empty());
+
+    container.terminateAll();
+}
+
 TEST(WebContainerTest, AMethodThePageRefusesIsAnInvalidVariantNotACrash)
 {
     ViewBackend backend;

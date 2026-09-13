@@ -24,6 +24,20 @@ struct WebModuleViewRequest {
     // install time), so a backend that serves the page over a custom scheme has
     // its document root here and needs no second policy.
     std::string moduleDir;
+    // WHERE THIS MODULE'S DATA LIVES ACROSS RUNS -- the same
+    // instance-persistence directory the Native container hands a Bare module,
+    // and empty when the host was started without one.
+    //
+    // A web module cannot be given this path directly: its filesystem is the
+    // image's, and what makes a write durable there is the browser's storage
+    // for the page's origin. So the backend is handed the directory and has to
+    // point its webview's storage at it. A backend that ignores it produces the
+    // worst failure in this container -- every write SUCCEEDS, reads back for
+    // the life of the page, and is gone on the next load, with no error
+    // anywhere. (Measured: the desktop webhost's off-the-record
+    // QWebEngineProfile kept IndexedDB in memory, so a keystore `web` variant
+    // created and committed a key and had none after a restart.)
+    std::string storagePath;
 };
 
 // ONE WEBVIEW, OWNED BY THE CONTAINER.

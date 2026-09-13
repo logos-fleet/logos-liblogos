@@ -142,6 +142,9 @@ bool WebContainer::launch(const ModuleDescriptor& desc,
     request.moduleDir = desc.path.empty()
         ? std::string()
         : fs::path(desc.path).parent_path().string();
+    // Same directory the Native container passes a Bare module, so a module's
+    // state is in one place whichever container ran it.
+    request.storagePath = desc.instancePersistencePath;
 
     std::unique_ptr<WebModuleView> view = factory(request);
     if (!view || !view->channel()) {
