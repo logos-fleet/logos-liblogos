@@ -172,4 +172,26 @@ foreach(_bare bare_fixture_bare bare_twin_bare)
     add_dependencies(logos_core_tests ${_bare})
 endforeach()
 
+# A THIRD Bare image, and the only one that behaves like a real module in the
+# one respect that matters to #96: it starts a thread of its OWN when its
+# context lands and keeps it running long past the unload, while answering
+# logos_module_about_to_unload with "already quiescent".
+#
+# Separate sources rather than a fourth build of bare_fixture_module.cpp,
+# because a module that starts a thread on every setContext is the wrong
+# fixture for every other test in the suite -- they load and unload the shared
+# image dozens of times.
+add_library(bare_threaded_bare MODULE fixtures/bare_threaded_fixture_module.cpp)
+set_target_properties(bare_threaded_bare PROPERTIES PREFIX "")
+if(APPLE)
+    set_target_properties(bare_threaded_bare PROPERTIES SUFFIX ".dylib")
+endif()
+target_include_directories(bare_threaded_bare PRIVATE
+    ${LOGOS_PROTOCOL_ROOT}/include
+    ${LOGOS_PROTOCOL_ROOT}/include/cpp
+)
+find_package(Threads REQUIRED)
+target_link_libraries(bare_threaded_bare PRIVATE Threads::Threads)
+add_dependencies(logos_core_tests bare_threaded_bare)
+
 gtest_discover_tests(logos_core_tests DISCOVERY_MODE PRE_TEST)

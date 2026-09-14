@@ -128,6 +128,19 @@ isolated (each module gets `LogosAPI::forIdentity` plus the core's credential
 via `TokenManager::adoptCredentialFor`), so a call INTO a module authorizes as
 that module.
 
+AN UNLOAD DOES NOT UNMAP THE IMAGE. A Bare module is a language core behind a C
+ABI with no word for "my runtime still has threads up" — chat_module's tokio
+runtime and delivery_module's nim scheduler both keep threads past
+`logos_module_about_to_unload`, and both answer it "already quiescent" because a
+runtime thread is not a dispatch. So the container can stop every thread IT made
+and still have no way to learn about those, and `dlclose` after a correct unload
+is a use-after-free of CODE: on Android it took the whole Shell process down
+with no tombstone (#96). `closeBareModule` therefore keeps every image a module
+has run in mapped for the life of the process — bounded by the number of
+DISTINCT images, and already what dyld does for a framework. A reload re-uses
+that mapping rather than re-running the image's initialisers, so a module that
+must re-initialise does it from the context it is handed afresh on every load.
+
 The `ModuleLoader` base, the `CompositeModuleLoader` / `ModuleLoaderRegistry`
 orchestration, the `isValidModuleName` allowlist (in `module_registry`), and the
 `logos_log` logging foundation are core concerns and remain in `logos-liblogos`

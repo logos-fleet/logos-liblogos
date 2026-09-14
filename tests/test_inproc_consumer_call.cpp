@@ -162,6 +162,20 @@ TEST(InProcConsumerCallTest, EveryCallOnTheSameHandleGetsItsOwnAnswer)
     // method, so the glue's own answer is QVariant(true) rather than a number,
     // and `total` reads the state the bumps left behind. Both are deferred like
     // any other published dispatch.
+    //
+    // READ RELATIVE, because the counter is a module GLOBAL and the fixture's
+    // image outlives every unload in this process (closeBareModule, #96): what
+    // an earlier test bumped is still in there. Six is what these three bumps
+    // are worth, and that is what is asserted.
+    const auto readTotal = [&]() -> long long {
+        logos::CallError err;
+        const QVariant total = client->invokeRemoteMethod(
+            mod.qname(), QStringLiteral("total"), QVariantList{}, Timeout(10000), &err);
+        EXPECT_TRUE(err.ok()) << err.message;
+        return total.toLongLong();
+    };
+
+    const long long before = readTotal();
     for (int i = 0; i < 3; ++i) {
         logos::CallError err;
         client->invokeRemoteMethod(mod.qname(), QStringLiteral("bump"),
@@ -169,10 +183,6 @@ TEST(InProcConsumerCallTest, EveryCallOnTheSameHandleGetsItsOwnAnswer)
         EXPECT_TRUE(err.ok()) << "bump " << i << ": " << err.message;
     }
 
-    logos::CallError err;
-    const QVariant total = client->invokeRemoteMethod(
-        mod.qname(), QStringLiteral("total"), QVariantList{}, Timeout(10000), &err);
-    EXPECT_TRUE(err.ok()) << err.message;
-    EXPECT_EQ(total.toLongLong(), 6)
+    EXPECT_EQ(readTotal() - before, 6)
         << "the three deferred bumps did not all reach the module";
 }
