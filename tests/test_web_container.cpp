@@ -46,6 +46,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -1382,20 +1383,29 @@ TEST(WebContainerTest, AnEventDeliveredWhileTheHostIsInACallIsNotHeldBehindIt)
     backend.page().subscribeToHost("clock_module", "ticked");
     ASSERT_TRUE(waitFor([&] { return routes.subscriptionCount() == 1; }, 2000));
 
+    // Bounded, and `fired` is set only on a real delivery: a case that fails
+    // must still reach its EXPECTs, and an unbounded spin here would instead
+    // strand this thread and turn the fatal assert below into a std::terminate
+    // on a joinable thread. The budget only ever expires on a broken run.
     std::atomic<bool> fired{false};
     std::thread firer([&] {
-        while (!routes.entered.load())
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(10);
+        while (!routes.entered.load()
+               && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        routes.fireEvent("clock_module", "ticked", { 7 });
-        fired.store(true);
+        if (routes.entered.load()
+            && routes.fireEvent("clock_module", "ticked", { 7 }))
+            fired.store(true);
     });
 
     routes.awaited = [&] { return fired.load(); };
     const uint64_t id = backend.page().callHost("slow_module", "pump");
 
     ResultMessage res;
-    ASSERT_TRUE(waitFor([&] { return backend.page().resultFor(id, res); }, 8000));
+    const bool answered = waitFor([&] { return backend.page().resultFor(id, res); }, 8000);
     firer.join();
+    ASSERT_TRUE(answered);
     EXPECT_TRUE(res.ok) << res.err;
 
     EXPECT_TRUE(routes.sawIt.load())

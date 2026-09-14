@@ -184,19 +184,26 @@ private:
     //
     // So the mutex is held only long enough to read `alive` and to record the
     // thread that is entering; `running` is what stop() waits on instead. It is
-    // a multiset because the work re-enters — one entry per live frame, and
-    // stop() ignores frames belonging to its OWN thread, since teardown reached
-    // from inside a page's call would otherwise wait for itself.
+    // a multiset because the work re-enters — one entry per live frame.
     struct Gate {
         std::mutex mutex;
         std::condition_variable idle;
         bool alive = true;
         std::multiset<std::thread::id> running;
+
+        // What stop() waits for. FRAMES ON THE CALLING THREAD DO NOT COUNT:
+        // teardown is reachable from inside a page's own call — a page that
+        // dies mid-call retires its module — and a wait that counted its own
+        // caller would be waiting for itself. Call with `mutex` held.
+        bool noOtherThreadInside() const
+        {
+            return running.size() == running.count(std::this_thread::get_id());
+        }
     };
 
     // Run `work` with the router guaranteed alive but NOTHING serialized behind
-    // it. False when the gate is already closed and `work` was not run.
-    static bool runUnderGate(const std::shared_ptr<Gate>& gate,
+    // it. Does nothing when the gate is already closed.
+    static void runUnderGate(const std::shared_ptr<Gate>& gate,
                              const std::function<void()>& work);
 
     // Queue `work` for the Qt main thread, or run it here when there is no

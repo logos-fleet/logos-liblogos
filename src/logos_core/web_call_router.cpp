@@ -175,32 +175,26 @@ void WebCallRouter::stop()
             routes->unsubscribe(key.first, key.second);
     }
     // Close the gate LAST: everything queued behind finds `alive` false and does
-    // nothing, and anything ALREADY inside is waited out here. The routes are
-    // dropped under the same lock, so nothing can reach them after their owner
-    // tears them down.
+    // nothing, and anything ALREADY inside is waited out here. Only then are
+    // the routes dropped, so no work can still be holding the pointer it read
+    // on its way in once their owner tears them down.
     //
-    // Waited out through `running` rather than by holding the mutex across the
-    // work (see Gate): the mutex is free while work runs, so a teardown racing
-    // a call blocks here instead of wedging the call.
-    //
-    // FRAMES ON THIS THREAD DO NOT COUNT. Teardown is reachable from inside a
-    // page's own call — a page that dies mid-call retires its module — and a
-    // wait that counted its own caller would be waiting for itself.
+    // THE WAIT IS WHAT PROVIDES THAT, not the lock. Work runs with the mutex
+    // free (see Gate), so holding it here proves nothing about who is inside;
+    // `running` does. The upside is that a teardown racing a call blocks here
+    // instead of wedging the call.
     std::unique_lock<std::mutex> closing(m_gate->mutex);
     m_gate->alive = false;
-    m_gate->idle.wait(closing, [this] {
-        return m_gate->running.size()
-            == m_gate->running.count(std::this_thread::get_id());
-    });
+    m_gate->idle.wait(closing, [this] { return m_gate->noOtherThreadInside(); });
     m_routes.store(nullptr);
 }
 
-bool WebCallRouter::runUnderGate(const std::shared_ptr<Gate>& gate,
+void WebCallRouter::runUnderGate(const std::shared_ptr<Gate>& gate,
                                  const std::function<void()>& work)
 {
     {
         std::lock_guard<std::mutex> lock(gate->mutex);
-        if (!gate->alive) return false;
+        if (!gate->alive) return;
         gate->running.insert(std::this_thread::get_id());
     }
     // THE MUTEX IS NOT HELD ACROSS `work`. It calls into the module's LogosAPI,
@@ -222,7 +216,6 @@ bool WebCallRouter::runUnderGate(const std::shared_ptr<Gate>& gate,
     } leave{gate};
 
     work();
-    return true;
 }
 
 void WebCallRouter::dispatch(const std::shared_ptr<Gate>& gate,
