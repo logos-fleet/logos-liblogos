@@ -2,6 +2,7 @@
 #define INPROC_CONTAINER_H
 
 #include "bare_module_abi.h"
+#include "module_resource_usage.h"
 
 #include <logos_container/module_container.h>
 
@@ -46,7 +47,7 @@ class BareModuleGlue;
 // container exists to satisfy and is stated here so nobody has to discover it:
 // the Native container buys reachability on a phone, not crash containment.
 // Crash containment on a Store shell is the Web container's job (ADR 0005).
-class InProcContainer : public ModuleContainer {
+class InProcContainer : public ModuleContainer, public ResourceMeasurable {
 public:
     InProcContainer();
     ~InProcContainer() override;
@@ -85,6 +86,18 @@ public:
 
     std::optional<int64_t> pid(const std::string& name) const override;
     std::unordered_map<std::string, int64_t> getAllPids() const override;
+
+    // WHAT THE PID SENTINEL COSTS EVERY CONSUMER ABOVE, answered here because
+    // this is the only place that can. process-stats reads a process, so with
+    // pid -1 it reports nothing and the Shell renders 0.0% / 0.0 MB for every
+    // Bundled module (#86) — a zero that is indistinguishable from a loaded,
+    // idle one.
+    //
+    // A module in this container is two things the host can measure without a
+    // process: the image it was dlopen'd from, and the one worker thread its
+    // handlers run on. See ModuleResourceUsage for what that account leaves
+    // out, and why a floor beats a zero.
+    std::unordered_map<std::string, ModuleResourceUsage> getAllResourceUsage() const override;
 
     // The pid every in-process module reports. Named rather than spelled -1 at
     // each site so the sentinel has one definition to grep for.

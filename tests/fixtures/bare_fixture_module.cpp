@@ -98,6 +98,8 @@ BARE_FIXTURE_EXPORT char* logos_module_get_methods(void)
       {"name":"inboundCaller","signature":"inboundCaller()","returnType":"tstr","isInvokable":true},
       {"name":"stall","signature":"stall(uint)","returnType":"uint","isInvokable":true,
        "parameters":[{"type":"uint","name":"ms"}]},
+      {"name":"burn","signature":"burn(uint)","returnType":"uint","isInvokable":true,
+       "parameters":[{"type":"uint","name":"ms"}]},
       {"name":"tick","signature":"tick(uint)","returnType":"void","isInvokable":true},
       {"type":"event","name":"ticked","signature":"ticked(uint)",
        "parameters":[{"type":"uint","name":"value"}]}
@@ -141,6 +143,20 @@ BARE_FIXTURE_EXPORT char* logos_module_dispatch(const char* method, const char* 
         // call in flight so a burst can be queued behind it.
         const long long ms = firstInt(argsJson, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        return dup(std::to_string(ms));
+    }
+    if (m == "burn") {
+        // stall()'s opposite: `ms` of wall clock spent RUNNING rather than
+        // sleeping. A sleeping dispatch costs the module no CPU at all, so it
+        // cannot show that the container charged the work to the right thread;
+        // this one can. The loop is volatile so no optimiser can delete it.
+        const long long ms = firstInt(argsJson, 0);
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        volatile double sink = 0.0;
+        while (std::chrono::steady_clock::now() < until) {
+            for (int i = 0; i < 20000; ++i)
+                sink += i * 0.5;
+        }
         return dup(std::to_string(ms));
     }
     if (m == "tick") {

@@ -1,6 +1,8 @@
 #ifndef MODULE_LOADER_H
 #define MODULE_LOADER_H
 
+#include "module_resource_usage.h"
+
 #include <logos_container/load_status.h>
 #include <logos_container/module_descriptor.h>
 #include <chrono>
@@ -65,6 +67,14 @@ public:
 
     // Return all (name -> pid) mappings. PIDs are -1 for non-process loaders.
     virtual std::unordered_map<std::string, int64_t> getAllPids() const { return {}; }
+
+    // What each module is costing, for a loader whose modules have no pid to
+    // measure by. EMPTY BY DEFAULT, and that is the right answer for a
+    // process-based loader: its modules are process-stats' to measure, and a
+    // second account of them here would be a second answer to the same
+    // question. See ModuleResourceUsage.
+    virtual std::unordered_map<std::string, ModuleResourceUsage>
+    getAllResourceUsage() const { return {}; }
 };
 
 } // namespace LogosCore

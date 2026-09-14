@@ -251,12 +251,34 @@ LOGOS_CORE_EXPORT char* logos_core_get_token(const char* key);
 // Returns a JSON string containing an array of module stats, NULL on error.
 // The returned string must be freed by the caller.
 //
-// ONE ENTRY PER RUNNING MODULE, whichever container it runs in. A module in the
-// Native container has no process of its own — it reports pid -1, the
-// LoadedModuleHandle sentinel — so its `cpu_percent`, `cpu_time_seconds` and
-// `memory_mb` are NULL rather than 0: those resources belong to the host
-// process and are already counted against its pid. `pid` is what distinguishes
-// the two cases.
+// ONE ENTRY PER RUNNING MODULE, whichever container it runs in, carrying
+// `name`, `pid`, `cpu_percent`, `cpu_time_seconds`, `memory_mb`, `scope` and
+// `memory_kind`.
+//
+// TWO KINDS OF MEASUREMENT, AND `scope` SAYS WHICH.
+//
+//   "process"     — the module runs in a subprocess and the figures are that
+//                   whole process, read from the OS by pid. `memory_kind` is
+//                   "rss".
+//
+//   "in_process"  — the module runs inside THIS process (the Native container;
+//                   pid is -1, the LoadedModuleHandle sentinel) and the figures
+//                   are one module's share of it, measured by the container:
+//                   `cpu_time_seconds` is its own dispatch thread's, `memory_mb`
+//                   is its image's footprint, and `memory_kind` is
+//                   "image_resident" or "image_mapped" depending on whether the
+//                   platform will report residency.
+//
+// A PARTIAL ACCOUNT IS STILL A MEASUREMENT, and that is the trade this makes.
+// An in-process module's heap allocations go through the host's allocator and
+// there is no boundary to charge them at, and work it does on threads of its
+// own is not on its dispatch thread — so both figures are floors. They are
+// reported as such rather than as zero, which read on screen as a loaded, idle
+// module and was nobody's measurement at all.
+//
+// Where even that cannot be had — a container with no way to measure its
+// modules — the three figures are NULL and `memory_kind` is null. NULL, never
+// 0: absent and idle are different answers.
 LOGOS_CORE_EXPORT char* logos_core_get_module_stats();
 
 // Set the base directory for module instance persistence.

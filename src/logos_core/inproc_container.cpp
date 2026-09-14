@@ -4,6 +4,7 @@
 #include <logos_api.h>
 #include <logos_api_provider.h>
 #include <logos_transport_config_json.h>
+#include <process_stats/process_stats.h>
 #include <token_manager.h>
 
 #include <QString>
@@ -440,6 +441,45 @@ std::unordered_map<std::string, int64_t> InProcContainer::getAllPids() const
     for (const auto& [name, _] : m_modules)
         pids.emplace(name, kInProcPid);
     return pids;
+}
+
+std::unordered_map<std::string, ModuleResourceUsage> InProcContainer::getAllResourceUsage() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unordered_map<std::string, ModuleResourceUsage> usage;
+    for (const auto& [name, instance] : m_modules) {
+        ModuleResourceUsage measured;
+
+        // The thread is the module's and nothing else runs on it, so its CPU is
+        // the module's. Absent until the container publishes the module (an
+        // unpublished glue dispatches inline, on the caller's thread, and there
+        // is no thread of its own to charge) — zero is the honest floor there.
+        if (instance->glue)
+            measured.cpuTimeSeconds = instance->glue->dispatchCpuSeconds().value_or(0.0);
+
+        // ANY address inside the image identifies it, and `dispatch` is the one
+        // entry point every Bare module must export — so this works for a
+        // module whose other optional symbols the loader could not resolve.
+        //
+        // Two modules sharing one image would each be charged the whole of it.
+        // That cannot happen through this container: it opens each image
+        // RTLD_LOCAL under one name, and a second module is a second file.
+        if (instance->abi.dispatch) {
+            const ProcessStats::ImageStatsData image = ProcessStats::getImageStats(
+                reinterpret_cast<const void*>(instance->abi.dispatch));
+            if (image.resolved) {
+                // Resident where the kernel will say so, the mapping where it
+                // will not — and which one it is travels with the number, so
+                // nothing above has to guess.
+                measured.memoryBytes =
+                    image.residentKnown ? image.residentBytes : image.mappedBytes;
+                measured.memoryIsResident = image.residentKnown;
+            }
+        }
+
+        usage.emplace(name, measured);
+    }
+    return usage;
 }
 
 } // namespace LogosCore

@@ -118,8 +118,38 @@ void BareModuleGlue::enableDeferredDispatch()
     m_workerThread->setObjectName(QString::fromStdString("logos-inproc-" + m_name));
     m_workerContext = new QObject();
     m_workerContext->moveToThread(m_workerThread);
+
+    // CAPTURED FROM INSIDE THE THREAD, which is the only place it can be: the
+    // handle ThreadCpuClock holds (a mach port, a POSIX per-thread clock id) is
+    // obtainable by the thread itself and by nobody else. A DirectConnection to
+    // QThread::started runs this in the worker, as its first act.
+    QObject::connect(m_workerThread, &QThread::started, m_workerContext, [this] {
+        std::lock_guard<std::mutex> lock(m_cpuMutex);
+        m_workerCpu = ProcessStats::ThreadCpuClock::forCurrentThread();
+        m_cpuCaptured.notify_all();
+    }, Qt::DirectConnection);
+
     m_workerThread->start();
     m_dispatch = Dispatch::Deferred;
+
+    // Waited for, so that "deferral is on" and "this module is measurable" are
+    // the same moment rather than a race a stats tick can land in. It is the
+    // thread reaching its first instruction, not anything the module does, so
+    // the bound is generous and being wrong about it costs only the CPU figure.
+    std::unique_lock<std::mutex> cpuLock(m_cpuMutex);
+    if (!m_cpuCaptured.wait_for(cpuLock, std::chrono::seconds(2),
+                                [this] { return m_workerCpu.valid(); })) {
+        spdlog::warn("Bare module {}: its dispatch thread did not report a CPU clock; "
+                     "the module will show no CPU of its own", m_name);
+    }
+}
+
+std::optional<double> BareModuleGlue::dispatchCpuSeconds() const
+{
+    std::lock_guard<std::mutex> lock(m_cpuMutex);
+    if (!m_workerCpu.valid())
+        return std::nullopt;
+    return m_workerCpu.cpuTimeSeconds();
 }
 
 bool BareModuleGlue::stopDispatch(int graceMs)
@@ -136,6 +166,14 @@ bool BareModuleGlue::stopDispatch(int graceMs)
     }
     if (!thread)
         return true;
+
+    // INVALIDATED BEFORE THE THREAD IS ASKED TO STOP. A thread handle can be
+    // recycled once its thread is gone, so a read that races the teardown would
+    // not fail — it would quietly report somebody else's work as this module's.
+    {
+        std::lock_guard<std::mutex> cpuLock(m_cpuMutex);
+        m_workerCpu = ProcessStats::ThreadCpuClock();
+    }
 
     thread->quit();
     const bool stopped = thread->wait(graceMs);

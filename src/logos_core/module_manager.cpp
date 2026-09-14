@@ -1770,6 +1770,10 @@ namespace ModuleManager {
         return loaderRegistry().getAllPids();
     }
 
+    std::unordered_map<std::string, LogosCore::ModuleResourceUsage> getModuleResourceUsage() {
+        return loaderRegistry().getAllResourceUsage();
+    }
+
     LogosCore::DependencyGateResult dependencyGateFor(const std::string& name) {
         return LogosCore::evaluateDependencyGate(
             registryInstance().moduleDependencyEntries(name),
