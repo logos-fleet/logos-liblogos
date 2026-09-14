@@ -1094,6 +1094,12 @@ std::string threadedModulePath()
     return p ? p : std::string();
 }
 
+// What the threaded fixture beats before its thread ends, from kBeats in
+// bare_threaded_fixture_module.cpp. Only the drain at the end of the test needs
+// it, and only to know when waiting further is pointless: a fixture that beat
+// fewer times than this would still be caught by the assertions above.
+constexpr int kThreadedFixtureBeats = 120;
+
 // The threaded fixture's heartbeat file is append-only, one line per beat, so a
 // line count IS a beat count — and a half-written final line cannot be counted
 // as a beat that happened.
@@ -1189,7 +1195,7 @@ TEST(BareImageRetentionTest, AModuleWhoseOwnThreadOutlivesTheUnloadDoesNotKillTh
 
     // Let the detached thread run out before the file goes: it writes straight
     // through, so removing the file under it only leaves a new one.
-    for (int i = 0; i < 200 && beatsIn(heartbeat) < 120; ++i)
+    for (int i = 0; i < 200 && beatsIn(heartbeat) < kThreadedFixtureBeats; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     std::filesystem::remove(heartbeat);
 }

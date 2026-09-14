@@ -104,26 +104,26 @@ void resolveOptional(void* handle, const char* name, Fn& slot)
 // refcount climb once per load/unload cycle would only make the loader's own
 // accounting a lie. A loader returns the same handle for the same image, which
 // is what makes the set the right shape.
-std::set<void*>& retainedImages()
-{
-    static std::set<void*> images;
-    return images;
-}
+struct RetainedImages {
+    std::mutex mutex;
+    std::set<void*> handles;
+};
 
-std::mutex& retainedImagesMutex()
+RetainedImages& retainedImages()
 {
-    static std::mutex m;
-    return m;
+    static RetainedImages retained;
+    return retained;
 }
 
 void retainImage(void* handle)
 {
-    bool pinned = false;
+    auto& retained = retainedImages();
+    bool pinnedByThisRelease = false;
     {
-        std::lock_guard<std::mutex> lock(retainedImagesMutex());
-        pinned = retainedImages().insert(handle).second;
+        std::lock_guard<std::mutex> lock(retained.mutex);
+        pinnedByThisRelease = retained.handles.insert(handle).second;
     }
-    if (!pinned) {
+    if (!pinnedByThisRelease) {
         // Already pinned: this reference is a spare and giving it back cannot
         // unmap anything.
         imageClose(handle);
@@ -189,8 +189,9 @@ void closeBareModule(BareModuleAbi& abi)
 
 std::size_t retainedBareImageCount()
 {
-    std::lock_guard<std::mutex> lock(retainedImagesMutex());
-    return retainedImages().size();
+    auto& retained = retainedImages();
+    std::lock_guard<std::mutex> lock(retained.mutex);
+    return retained.handles.size();
 }
 
 bool bareModuleProtocolCompatible(const std::string& moduleVersion, std::string* reason)

@@ -362,11 +362,11 @@ void InProcContainer::terminate(const std::string& name)
     if (!instance->glue->stopDispatch(kUnloadGraceMs)) {
         // ABANDONED, not destroyed. The worker is executing code in the image
         // and holds a pointer to the glue, so freeing the glue is a
-        // use-after-free — which is the half the ordinary path does NOT have to
-        // worry about, the image being kept mapped either way. The module is out of the
-        // container's map (it is already erased above), so a reload gets a fresh
-        // image; what stays behind is one leaked instance, which is the only
-        // outcome here that is not a crash.
+        // use-after-free — the half the ordinary path does NOT have to worry
+        // about, since the image is kept mapped either way. The module is out
+        // of the container's map (it is already erased above), so a reload gets
+        // a fresh instance; what stays behind is one leaked instance, which is
+        // the only outcome here that is not a crash.
         //
         // Reachable when a handler is waiting on an outbound reply, because that
         // reply is serviced on the very thread running this teardown.

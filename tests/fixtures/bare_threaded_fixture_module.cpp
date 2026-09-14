@@ -54,7 +54,6 @@ constexpr int kBeats = 120;
 constexpr int kBeatIntervalMs = 5;
 
 std::atomic<bool> g_started{false};
-std::string g_heartbeatPath;
 
 char* dup(const std::string& s)
 {
@@ -116,8 +115,7 @@ BARE_FIXTURE_EXPORT void logos_module_set_context(const char*,
         return;
     if (g_started.exchange(true))
         return;
-    g_heartbeatPath = instancePersistencePath;
-    std::thread(heartbeat, g_heartbeatPath).detach();
+    std::thread(heartbeat, std::string(instancePersistencePath)).detach();
 }
 
 BARE_FIXTURE_EXPORT void logos_module_set_emit_callback(bare_emit_cb, void*) {}
