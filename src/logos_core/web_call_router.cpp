@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <thread>
 #include <utility>
 
 namespace LogosCore {
@@ -173,22 +174,55 @@ void WebCallRouter::stop()
         for (const auto& [key, sink] : sinks)
             routes->unsubscribe(key.first, key.second);
     }
-    // Close the gate LAST and under its own mutex: work already running holds
-    // that mutex, so this waits it out, and everything queued behind finds
-    // `alive` false and does nothing. The routes are dropped under the same
-    // lock, so nothing can reach them after their owner tears them down.
-    std::lock_guard<std::mutex> closing(m_gate->mutex);
+    // Close the gate LAST: everything queued behind finds `alive` false and does
+    // nothing, and anything ALREADY inside is waited out here. Only then are
+    // the routes dropped, so no work can still be holding the pointer it read
+    // on its way in once their owner tears them down.
+    //
+    // THE WAIT IS WHAT PROVIDES THAT, not the lock. Work runs with the mutex
+    // free (see Gate), so holding it here proves nothing about who is inside;
+    // `running` does. The upside is that a teardown racing a call blocks here
+    // instead of wedging the call.
+    std::unique_lock<std::mutex> closing(m_gate->mutex);
     m_gate->alive = false;
+    m_gate->idle.wait(closing, [this] { return m_gate->noOtherThreadInside(); });
     m_routes.store(nullptr);
+}
+
+void WebCallRouter::runUnderGate(const std::shared_ptr<Gate>& gate,
+                                 const std::function<void()>& work)
+{
+    {
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        if (!gate->alive) return;
+        gate->running.insert(std::this_thread::get_id());
+    }
+    // THE MUTEX IS NOT HELD ACROSS `work`. It calls into the module's LogosAPI,
+    // which for an in-process target spins a nested event loop, which runs this
+    // router's next message on this very thread — so a held mutex here is a
+    // self-deadlock rather than a slow path (logos-workspace#113).
+    //
+    // RAII so a throwing route still leaves the count right: a leaked entry
+    // would hang every later stop() instead of the current call.
+    struct Leave {
+        const std::shared_ptr<Gate>& gate;
+        ~Leave()
+        {
+            std::lock_guard<std::mutex> lock(gate->mutex);
+            auto it = gate->running.find(std::this_thread::get_id());
+            if (it != gate->running.end()) gate->running.erase(it);
+            gate->idle.notify_all();
+        }
+    } leave{gate};
+
+    work();
 }
 
 void WebCallRouter::dispatch(const std::shared_ptr<Gate>& gate,
                              std::function<void()> work)
 {
     runOnQtMainThread([gate, work = std::move(work)] {
-        std::lock_guard<std::mutex> lock(gate->mutex);
-        if (!gate->alive) return;
-        work();
+        runUnderGate(gate, work);
     });
 }
 
@@ -277,20 +311,24 @@ void WebCallRouter::onSubscribe(const SubscribeMessage& req, EventSink sink,
         // gate instead of a dangling `this`.
         const bool armed = routes->subscribe(target, eventName,
             [this, gate, target, eventName](const QString& name, const QVariantList& data) {
-                std::lock_guard<std::mutex> live(gate->mutex);
-                if (!gate->alive) return;
-                EventSink sink;
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    auto it = m_sinks.find({target, eventName});
-                    if (it == m_sinks.end()) return;
-                    sink = it->second;
-                }
-                EventMessage msg;
-                msg.object = target;
-                msg.eventName = name.toStdString();
-                msg.data = logos::plain::qvariantListToRpcList(data);
-                sink(std::move(msg));
+                // Under the gate, NOT under its mutex: this arrives on the
+                // emitting module's own thread, and holding the mutex across
+                // the write put every native module's events in a queue behind
+                // whatever call the page happened to have in flight.
+                runUnderGate(gate, [&] {
+                    EventSink sink;
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        auto it = m_sinks.find({target, eventName});
+                        if (it == m_sinks.end()) return;
+                        sink = it->second;
+                    }
+                    EventMessage msg;
+                    msg.object = target;
+                    msg.eventName = name.toStdString();
+                    msg.data = logos::plain::qvariantListToRpcList(data);
+                    sink(std::move(msg));
+                });
             });
         if (!armed)
             spdlog::warn("Web module {}: could not subscribe to {}/{}", moduleName,

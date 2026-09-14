@@ -9,11 +9,14 @@
 #include <QVariantList>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
+#include <thread>
 #include <utility>
 
 class LogosAPI;
@@ -162,13 +165,46 @@ private:
     // post, so by the time it runs the router may be gone — a page whose
     // renderer died is retired from the Qt main thread, which is the very
     // thread the work is queued on. The gate is shared with every piece of work
-    // this router hands out: the destructor takes its mutex and clears `alive`,
-    // so work either runs with the router guaranteed to be there or does not
-    // run at all, and the destructor waits out anything already inside.
+    // this router hands out: stop() clears `alive`, so work either runs with
+    // the router guaranteed to be there or does not run at all, and stop()
+    // waits out anything already inside.
+    //
+    // IT GUARANTEES LIFETIME, NOT EXCLUSION, and the distinction is the whole
+    // of logos-workspace#113. Holding the mutex ACROSS the work serialized
+    // everything this router does behind whatever it was currently doing — and
+    // what it is currently doing is often a synchronous call into another
+    // module. For an in-process Bare target that call spins a NESTED QEventLoop
+    // (LocalLogosObject::resolveDeferred) to wait for the reply, which runs the
+    // main thread's other work while the call is still on the stack: the page's
+    // next message arrives, re-enters this router ON THIS THREAD, and blocks on
+    // a plain std::mutex this thread already holds. On the Shell that wedged
+    // the main thread for the life of the process, with capability_module's
+    // worker waiting behind it for a `runOnQtMainThread` hop that would now
+    // never be serviced.
+    //
+    // So the mutex is held only long enough to read `alive` and to record the
+    // thread that is entering; `running` is what stop() waits on instead. It is
+    // a multiset because the work re-enters — one entry per live frame.
     struct Gate {
         std::mutex mutex;
+        std::condition_variable idle;
         bool alive = true;
+        std::multiset<std::thread::id> running;
+
+        // What stop() waits for. FRAMES ON THE CALLING THREAD DO NOT COUNT:
+        // teardown is reachable from inside a page's own call — a page that
+        // dies mid-call retires its module — and a wait that counted its own
+        // caller would be waiting for itself. Call with `mutex` held.
+        bool noOtherThreadInside() const
+        {
+            return running.size() == running.count(std::this_thread::get_id());
+        }
     };
+
+    // Run `work` with the router guaranteed alive but NOTHING serialized behind
+    // it. Does nothing when the gate is already closed.
+    static void runUnderGate(const std::shared_ptr<Gate>& gate,
+                             const std::function<void()>& work);
 
     // Queue `work` for the Qt main thread, or run it here when there is no
     // event loop to queue on. Either way it runs under the gate.

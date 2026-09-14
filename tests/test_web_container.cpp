@@ -44,7 +44,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -1264,4 +1268,191 @@ TEST(WebContainerTest, APageThatDiesInsideACallIsNotAHostCrash)
     // which is what the teardown stops.
     EXPECT_TRUE(waitFor([&] { return routes.subscriptionCount() == 0; }, 5000))
         << "a page that died inside a call was never torn down";
+}
+
+// ── re-entrancy: a host call that pumps the loop ────────────────────────────
+//
+// THE SHAPE OF logos-workspace#113. A page calls a native module; the router
+// hands the call to the module's LogosAPI ON THE QT MAIN THREAD; the first call
+// to a target runs the capability handshake, and for an in-process Bare target
+// that handshake is SYNCHRONOUS and spins a nested QEventLoop
+// (LocalLogosObject::resolveDeferred) to wait for the reply.
+//
+// A nested loop is the whole problem: it runs the main thread's other work
+// while the call is still on the stack. That work includes the page's NEXT
+// message — a second call, or an event on its way back down — and every one of
+// those re-enters this same router on this same thread. So a router that holds
+// a lock across the call it dispatched deadlocks against itself, which is
+// exactly what the Shell did on the iPad: the main thread wedged in
+// `WebCallRouter::dispatch` on a mutex it was already holding, and
+// capability_module's worker waited forever for the main thread to answer a
+// `runOnQtMainThread` hop it would now never reach.
+//
+// The router's gate therefore guarantees LIFETIME, not EXCLUSION: work runs
+// with the router proven alive, but nothing else is serialized behind it.
+
+namespace {
+
+// A host call that blocks, pumping the Qt loop while it waits — a stand-in for
+// the nested QEventLoop a synchronous handshake against a Bare module spins.
+class PumpingRoutes : public FakeRoutes {
+public:
+    // Set by the case: what the blocked call is waiting to observe.
+    std::function<bool()> awaited;
+    // Whether it observed it BEFORE its own budget ran out. That is the whole
+    // assertion: false means the thing it waited for was queued behind it.
+    std::atomic<bool> sawIt{false};
+    std::atomic<bool> entered{false};
+    // Runs once, inside the call, before the wait begins.
+    std::function<void()> onEnter;
+
+    CallOutcome call(const std::string& target, const std::string& method,
+                     const QVariantList& args) override
+    {
+        if (method != "pump") return FakeRoutes::call(target, method, args);
+        entered.store(true);
+        if (onEnter) { auto once = std::move(onEnter); once(); }
+        sawIt.store(awaited ? waitFor(awaited, 3000) : false);
+        CallOutcome outcome;
+        outcome.ok = true;
+        outcome.value = QStringLiteral("pumped");
+        return outcome;
+    }
+};
+
+// A DEADLINE FOR A CASE THAT CANNOT FAIL POLITELY.
+//
+// The second case below re-enters the router on the thread that is already
+// inside it. When the bug is present that is a self-deadlock in a plain
+// std::mutex: the thread under test is the one that would have reported, so
+// there is nobody left to fail the test and the binary hangs until whatever is
+// running it gives up — a nix check's timeout, measured in hours. This turns
+// that into a named exit in seconds. It fires only when the case is already
+// broken, so a passing run never sees it.
+class Deadline {
+public:
+    Deadline(const char* what, int budgetMs)
+        : m_what(what), m_budgetMs(budgetMs)
+    {
+        m_thread = std::thread([this] {
+            std::unique_lock<std::mutex> lock(m_mu);
+            if (m_cv.wait_for(lock, std::chrono::milliseconds(m_budgetMs),
+                              [this] { return m_done; }))
+                return;
+            std::fprintf(stderr,
+                         "\nDEADLINE: %s did not finish within %d ms -- the router "
+                         "deadlocked against itself (logos-workspace#113).\n",
+                         m_what, m_budgetMs);
+            std::fflush(stderr);
+            std::_Exit(1);
+        });
+    }
+
+    ~Deadline()
+    {
+        { std::lock_guard<std::mutex> g(m_mu); m_done = true; }
+        m_cv.notify_all();
+        m_thread.join();
+    }
+
+private:
+    const char* m_what;
+    int m_budgetMs;
+    bool m_done = false;
+    std::mutex m_mu;
+    std::condition_variable m_cv;
+    std::thread m_thread;
+};
+
+} // namespace
+
+// The bounded half of the bug, and the one that fails cleanly: an event from a
+// native module, delivered on that module's own thread, must not wait for a
+// call the page made to finish. Same gate, different edge — and this one can be
+// contended from another thread, so it reports instead of wedging.
+TEST(WebContainerTest, AnEventDeliveredWhileTheHostIsInACallIsNotHeldBehindIt)
+{
+    ensureApp();
+    ViewBackend backend;
+    PumpingRoutes routes;
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    backend.page().subscribeToHost("clock_module", "ticked");
+    ASSERT_TRUE(waitFor([&] { return routes.subscriptionCount() == 1; }, 2000));
+
+    // Bounded, and `fired` is set only on a real delivery: a case that fails
+    // must still reach its EXPECTs, and an unbounded spin here would instead
+    // strand this thread and turn the fatal assert below into a std::terminate
+    // on a joinable thread. The budget only ever expires on a broken run.
+    std::atomic<bool> fired{false};
+    std::thread firer([&] {
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(10);
+        while (!routes.entered.load()
+               && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (routes.entered.load()
+            && routes.fireEvent("clock_module", "ticked", { 7 }))
+            fired.store(true);
+    });
+
+    routes.awaited = [&] { return fired.load(); };
+    const uint64_t id = backend.page().callHost("slow_module", "pump");
+
+    ResultMessage res;
+    const bool answered = waitFor([&] { return backend.page().resultFor(id, res); }, 8000);
+    firer.join();
+    ASSERT_TRUE(answered);
+    EXPECT_TRUE(res.ok) << res.err;
+
+    EXPECT_TRUE(routes.sawIt.load())
+        << "a native module's event was held behind the page's in-flight call: "
+           "the router serialized them behind one lock";
+    EXPECT_FALSE(backend.page().eventsFromHost().empty())
+        << "the event never reached the page at all";
+
+    container.terminateAll();
+}
+
+// The bug as the Shell met it: the page's SECOND call arrives while the first
+// is still on the stack, on the same thread, out of the nested loop the first
+// one is spinning. It has to be answered — the first call cannot finish until
+// it is.
+TEST(WebContainerTest, ASecondCallArrivingInsideTheFirstIsAnswered)
+{
+    Deadline deadline("ASecondCallArrivingInsideTheFirstIsAnswered", 20000);
+
+    ensureApp();
+    ViewBackend backend;
+    PumpingRoutes routes;
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    std::atomic<uint64_t> inner{0};
+    ResultMessage innerRes;
+    routes.onEnter = [&] {
+        inner.store(backend.page().callHost("math_module", "double",
+                                            { RpcValue(int64_t{21}) }));
+    };
+    routes.awaited = [&] {
+        const uint64_t id = inner.load();
+        return id != 0 && backend.page().resultFor(id, innerRes);
+    };
+
+    const uint64_t outer = backend.page().callHost("math_module", "pump");
+    ResultMessage res;
+    ASSERT_TRUE(waitFor([&] { return backend.page().resultFor(outer, res); }, 8000));
+    EXPECT_TRUE(res.ok) << res.err;
+
+    EXPECT_TRUE(routes.sawIt.load())
+        << "a call made from inside another call was never answered";
+    EXPECT_TRUE(innerRes.ok) << innerRes.err;
+    EXPECT_EQ(asInteger(innerRes.value), 42);
+
+    container.terminateAll();
 }
