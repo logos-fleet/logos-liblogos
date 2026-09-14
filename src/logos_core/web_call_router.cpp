@@ -58,18 +58,19 @@ WebHostRoutes::CallOutcome refusedCallOutcome(const std::string& target,
     // still came back unauthorized is a token fault wearing a consent refusal's
     // clothes -- relabelling either would send a developer to a dialog that is
     // not the problem.
-    const std::string state =
-        consentStatus.value(QStringLiteral("state")).toString().toStdString();
-    const QString reason = consentStatus.value(QStringLiteral("reason")).toString();
-    if (state != "pending" && state != "unknown" && state != "denied")
-        return outcome;
+    const QString state = consentStatus.value(QStringLiteral("state")).toString();
+    if (state == QLatin1String("denied"))
+        outcome.errorCode = "CONSENT_DENIED";
+    else if (state == QLatin1String("pending") || state == QLatin1String("unknown"))
+        outcome.errorCode = "CONSENT_REQUIRED";
+    else
+        return outcome;   // granted, not-required, or nothing was asked
 
-    outcome.errorCode = state == "denied" ? "CONSENT_DENIED" : "CONSENT_REQUIRED";
+    const QString reason = consentStatus.value(QStringLiteral("reason")).toString();
     if (!reason.isEmpty())
         outcome.error = reason.toStdString();
     return outcome;
 }
-
 
 LogosApiRoutes::LogosApiRoutes(LogosAPI* api, std::string moduleName)
     : m_api(api)
@@ -141,7 +142,8 @@ QVariantMap LogosApiRoutes::consentStatusFor(const std::string& target)
     // ITSELF cannot be explained by asking capability_module.
     if (!m_api || target == kCapabilityModule)
         return {};
-    LogosAPIClient* broker = m_api->getClient(QStringLiteral("capability_module"));
+    const QString brokerName = QString::fromLatin1(kCapabilityModule);
+    LogosAPIClient* broker = m_api->getClient(brokerName);
     if (!broker)
         return {};
 
@@ -151,7 +153,7 @@ QVariantMap LogosApiRoutes::consentStatusFor(const std::string& target)
     // about its own pair grants it nothing it did not already have.
     logos::CallError err;
     const QVariant answer = broker->invokeRemoteMethod(
-        QStringLiteral("capability_module"), QStringLiteral("consentStatus"),
+        brokerName, QStringLiteral("consentStatus"),
         QVariantList{ QString::fromStdString(m_moduleName),
                       QString::fromStdString(target) },
         Timeout(), &err);
