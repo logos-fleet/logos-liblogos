@@ -1005,17 +1005,23 @@ TEST_F(BareModuleGlueTest, ChargesItsWorkerThreadsCpuToTheModule)
     const std::optional<double> idle = m_glue->dispatchCpuSeconds();
     ASSERT_TRUE(idle.has_value()) << "a started worker thread must be measurable";
 
-    // burn() SPINS, where stall() sleeps: a sleeping dispatch costs no CPU and
-    // could not tell a working thread from an idle one.
+    // burn() WORKS, where stall() sleeps: a sleeping dispatch costs no CPU and
+    // could not tell a working thread from an idle one. Its argument is a count
+    // of iterations rather than a duration, so the CPU it costs does not depend
+    // on what share of a core this machine is giving the test -- see the note
+    // in the fixture.
     QString callId;
     ASSERT_TRUE(logos::isPendingCallSentinel(
-        m_glue->callMethod(QStringLiteral("burn"), QVariantList{300}), &callId));
+        m_glue->callMethod(QStringLiteral("burn"), QVariantList{100}), &callId));
     ASSERT_TRUE(completions.waitFor(1)) << "the burn never completed";
 
     const std::optional<double> charged = m_glue->dispatchCpuSeconds();
     ASSERT_TRUE(charged.has_value());
-    EXPECT_GE(*charged - *idle, 0.15)
-        << "300ms of spinning inside the module was not charged to its thread";
+    // A hundred million volatile additions. The floor is a small fraction of
+    // what that actually costs: the claim under test is that the work landed on
+    // THIS thread's account, not that the machine is a particular speed.
+    EXPECT_GE(*charged - *idle, 0.02)
+        << "the work done inside the module was not charged to its thread";
 
     ASSERT_TRUE(m_glue->stopDispatch(2000));
     EXPECT_FALSE(m_glue->dispatchCpuSeconds().has_value())
