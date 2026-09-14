@@ -328,12 +328,18 @@
             # process" costs is exactly this collision, so the fixture is built
             # twice rather than asserted about once.
             export TEST_BARE_MODULE_TWIN="${testsPkg}/lib/bare_twin_bare.${pluginExt}"
+            # A THIRD image: a Bare module that starts a thread of its OWN when
+            # its context lands and keeps it running past the unload, which is
+            # what every real language core does and what no other fixture here
+            # does. It is the only thing in the suite that can fail the way #96
+            # failed on the phone — by taking this whole process down.
+            export TEST_BARE_MODULE_THREADED="${testsPkg}/lib/bare_threaded_bare.${pluginExt}"
             # A loadable image that is NOT a module — the container must report
             # it as a load error rather than crash on it. The test binary itself
             # is the most honest example in reach.
             export TEST_NON_MODULE_IMAGE="${testsPkg}/bin/logos_core_tests"
             export LOGOS_REQUIRE_TEST_FIXTURES=1
-            for f in "$TEST_PLUGIN_DEP_RANGE" "$TEST_PLUGIN_DEP_MALFORMED" "$TEST_REAL_HOST" "$TEST_BARE_MODULE" "$TEST_BARE_MODULE_TWIN"; do
+            for f in "$TEST_PLUGIN_DEP_RANGE" "$TEST_PLUGIN_DEP_MALFORMED" "$TEST_REAL_HOST" "$TEST_BARE_MODULE" "$TEST_BARE_MODULE_TWIN" "$TEST_BARE_MODULE_THREADED"; do
               if [ ! -f "$f" ]; then
                 echo "Error: constraint fixture not found at $f" >&2
                 exit 1

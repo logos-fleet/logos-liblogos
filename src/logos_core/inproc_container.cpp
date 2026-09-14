@@ -352,8 +352,8 @@ void InProcContainer::terminate(const std::string& name)
         onTerminated = instance->onTerminated;
     }
 
-    // Ask, then stop, then unpublish, then close — in that order, because each
-    // step removes a way back into the next one's memory.
+    // Ask, then stop, then unpublish, then let go of the image — in that order,
+    // because each step removes a way back into the next one's memory.
     instance->glue->aboutToUnload(kUnloadGraceMs);
 
     // The dispatch thread has to be off before anything else is taken away: it
@@ -361,11 +361,12 @@ void InProcContainer::terminate(const std::string& name)
     // back through the provider on its way out.
     if (!instance->glue->stopDispatch(kUnloadGraceMs)) {
         // ABANDONED, not destroyed. The worker is executing code in the image
-        // and holds a pointer to the glue, so freeing either is a use-after-free
-        // and dlclose is an unmap of running code. The module is out of the
-        // container's map (it is already erased above), so a reload gets a fresh
-        // image; what stays behind is one leaked instance, which is the only
-        // outcome here that is not a crash.
+        // and holds a pointer to the glue, so freeing the glue is a
+        // use-after-free — the half the ordinary path does NOT have to worry
+        // about, since the image is kept mapped either way. The module is out
+        // of the container's map (it is already erased above), so a reload gets
+        // a fresh instance; what stays behind is one leaked instance, which is
+        // the only outcome here that is not a crash.
         //
         // Reachable when a handler is waiting on an outbound reply, because that
         // reply is serviced on the very thread running this teardown.
@@ -392,9 +393,15 @@ void InProcContainer::terminate(const std::string& name)
     }
 
     // The glue clears the module's emit callback in its destructor, so nothing
-    // in the image can reach back once this returns — which is what makes the
-    // dlclose below safe, and what makes a reload load a fresh image instead of
-    // finding the old one still resident.
+    // in the image can reach back into the host once this returns — which is
+    // what makes the module really unloaded: out of the map, unpublished, and
+    // unable to call anybody.
+    //
+    // The IMAGE stays mapped all the same. closeBareModule keeps it, because
+    // the host has quiesced every thread IT made and has no way to learn about
+    // the ones the module made — see the note there, and #96, where unmapping
+    // one out from under a Rust runtime's thread took the Android Shell's whole
+    // process down. A reload re-uses the mapping rather than making a second.
     instance->glue.reset();
     closeBareModule(instance->abi);
 

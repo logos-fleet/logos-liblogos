@@ -1,6 +1,7 @@
 #ifndef BARE_MODULE_ABI_H
 #define BARE_MODULE_ABI_H
 
+#include <cstddef>
 #include <string>
 
 // A resolved Bare module image.
@@ -65,9 +66,64 @@ struct BareModuleAbi {
 // the caller reports, not a crash of the host that tried.
 bool openBareModule(const std::string& path, BareModuleAbi& out, std::string* error);
 
-// Close a previously opened image and null the whole table. Safe on a
-// default-constructed BareModuleAbi.
+// Let go of a previously opened image: the whole ABI table is nulled and the
+// host stops reaching into the module. Safe on a default-constructed
+// BareModuleAbi.
+//
+// IT DOES NOT UNMAP THE IMAGE, AND THAT IS THE POINT (#96).
+//
+// A Bare module is a language core behind a C ABI, and that ABI has no word for
+// "my runtime still has threads up". chat_module carries a Rust tokio runtime,
+// delivery_module a nim scheduler; both start threads when their context lands,
+// both keep them past logos_module_about_to_unload, and both answer that call
+// with "already quiescent" — which from inside the module is true, because a
+// runtime thread is not a dispatch. The container can quiesce every thread the
+// HOST made (BareModuleGlue::stopDispatch) and still have no way to learn about
+// those, and the manifest does not declare them either.
+//
+// So dlclose after an unload is a use-after-free of CODE, and what it costs
+// depends entirely on the loader:
+//
+//   * bionic really unmaps. A surviving module thread executes an unmapped page
+//     and the process dies with NO tombstone, no `logcat -b crash` entry and no
+//     am_kill — which is exactly how #96 was found: unloading chat_module from
+//     the Android Shell's Modules tab took the Shell down 0.8s later.
+//   * glibc unmaps too, so `logoscore --container inproc` on desktop Linux has
+//     always had the same defect; nothing on that platform had unloaded a
+//     threaded Bare module yet.
+//   * dyld unmaps a bundle and generally does NOT unmap a framework, which is
+//     why the identical sequence round-trips on the iPads: the chat core stays
+//     mapped there whatever the host asks for, and the leak is invisible.
+//
+// The right answer is therefore the one InProcContainer::terminate already
+// reaches for when its dispatch thread will not stop — keep the image mapped
+// for the life of the process, and carry on — applied to every unload rather
+// than only to that one. The module is out of the container's map either way,
+// so it is really unloaded: unpublished, its glue destroyed, its emit callback
+// cleared. What stays is one mapping, and a reload re-uses it rather than
+// mapping a second copy.
+//
+// WHAT IT COSTS, stated rather than implied. An image kept mapped is memory
+// this process never gives back — bounded by the number of DISTINCT module
+// images the process ever loaded, not by how often they are unloaded. And a
+// reload no longer re-runs the image's initialisers, so a module's statics
+// survive an unload/reload cycle. That is already what every iOS host does, so
+// this makes the platforms agree rather than adding a new behaviour; a module
+// whose re-initialisation matters must do it from logos_module_set_context,
+// which is delivered afresh on every load.
+//
+// The one close that DOES unmap is inside openBareModule, for an image that
+// turned out not to export the module ABI: nothing ever handed it a context or
+// dispatched into it, and refusing to give back a file that was never a module
+// would make every mistyped path cost a mapping for the life of the process.
 void closeBareModule(BareModuleAbi& abi);
+
+// How many distinct images this process is holding mapped on the rule above.
+//
+// Exposed because it is otherwise invisible: it is the number a reader wants
+// when the process's footprint does not come back down after an unload, and the
+// one thing a test can assert about the decision without asking the loader.
+std::size_t retainedBareImageCount();
 
 // True when `moduleVersion` (as returned by logos_module_get_protocol_version)
 // shares this host's logos-protocol MAJOR — the same rule the metadata-stamp

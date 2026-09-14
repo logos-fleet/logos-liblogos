@@ -41,10 +41,16 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if !defined(_WIN32)
+#  include <dlfcn.h>
+#endif
 
 using LogosTests::bareDescriptor;
 using LogosTests::bareModulePath;
@@ -331,7 +337,7 @@ TEST(InProcContainerTest, AnImageWithoutTheAbiIsRefused)
         << "the diagnostic must name the missing entry point; got: " << error;
 }
 
-TEST(InProcContainerTest, UnloadFreesTheImageSoAReloadGetsAFreshOne)
+TEST(InProcContainerTest, AnUnloadedModuleCanBeLoadedAgain)
 {
     ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
     LogosCore::InProcContainer container;
@@ -340,9 +346,15 @@ TEST(InProcContainerTest, UnloadFreesTheImageSoAReloadGetsAFreshOne)
     ASSERT_TRUE(container.launch(bareDescriptor(), "", {}, nullptr, handle));
     container.terminate("bare_fixture");
 
-    // The reload is the assertion: a container that leaked the image (never
-    // dlclose'd, or left the module's emit callback pointing at a destroyed
-    // glue) either refuses this or reaches into freed memory.
+    // The reload is the assertion: a container that let the unload leave state
+    // behind — a name still in its map, an emit callback still pointing at a
+    // destroyed glue — either refuses this or reaches into freed memory.
+    //
+    // The IMAGE is state it deliberately does leave behind, and this is where
+    // that shows: the second load re-uses the mapping the first one made rather
+    // than re-running the image's initialisers (closeBareModule, #96). Nothing
+    // in the host depends on the difference, and a module that needs to
+    // re-initialise is handed a fresh context on every load.
     ASSERT_TRUE(container.launch(bareDescriptor(), "", {}, nullptr, handle));
     EXPECT_TRUE(container.hasModule("bare_fixture"));
     container.terminate("bare_fixture");
@@ -609,11 +621,19 @@ TEST(TwoBareModulesTest, EachModuleKeepsItsOwnState)
     LogosCore::BareModuleGlue glueA("bare_a", "1.0.0", abiA);
     LogosCore::BareModuleGlue glueB("bare_b", "1.0.0", abiB);
 
+    // RELATIVE readings. Both images outlive every unload in this process
+    // (closeBareModule, #96), so each counter carries whatever an earlier test
+    // bumped it by. What this test is about is which image a bump LANDS in, and
+    // a delta says that as precisely as an absolute would — while an absolute
+    // would also, silently, be asserting that no earlier test touched it.
+    const long long beforeA = glueA.callMethod(QStringLiteral("total"), {}).toLongLong();
+    const long long beforeB = glueB.callMethod(QStringLiteral("total"), {}).toLongLong();
+
     glueA.callMethod(QStringLiteral("bump"), QVariantList{5});
     glueB.callMethod(QStringLiteral("bump"), QVariantList{100});
 
-    EXPECT_EQ(glueA.callMethod(QStringLiteral("total"), {}).toLongLong(), 5);
-    EXPECT_EQ(glueB.callMethod(QStringLiteral("total"), {}).toLongLong(), 100);
+    EXPECT_EQ(glueA.callMethod(QStringLiteral("total"), {}).toLongLong() - beforeA, 5);
+    EXPECT_EQ(glueB.callMethod(QStringLiteral("total"), {}).toLongLong() - beforeB, 100);
 
     container.terminateAll();
     LogosCore::closeBareModule(abiA);
@@ -1047,4 +1067,135 @@ TEST(InProcModuleUsageTest, ACompositeLoaderPassesTheMeasurementThrough)
     EXPECT_GT(usage.at("bare_fixture").memoryBytes, 0u);
 
     loader.terminateAll();
+}
+
+// ── an image a module has RUN in is never unmapped (#96) ────────────────────
+//
+// The container's careful teardown — ask, stop the dispatch thread, unpublish,
+// close — accounts for every thread the HOST made. It cannot account for the
+// threads the MODULE made: a Bare module is a language core behind a C ABI, and
+// neither the ABI nor the manifest has a word for "my runtime still has threads
+// up". chat_module's tokio runtime and delivery_module's nim scheduler both do,
+// and both answer logos_module_about_to_unload with "already quiescent",
+// because from inside the module that is true.
+//
+// So an unmap after a correct unload is a use-after-free of CODE. It reads as a
+// process that simply stops: on the Samsung it took the Shell down with no
+// tombstone, no `logcat -b crash` line and no am_kill (#96). Whether it is seen
+// at all is up to the loader — bionic really unmaps, glibc unmaps, dyld unmaps
+// a bundle and keeps a framework — which is why this was an Android-only
+// symptom of a portable defect.
+
+namespace {
+
+std::string threadedModulePath()
+{
+    const char* p = std::getenv("TEST_BARE_MODULE_THREADED");
+    return p ? p : std::string();
+}
+
+// What the threaded fixture beats before its thread ends, from kBeats in
+// bare_threaded_fixture_module.cpp. Only the drain at the end of the test needs
+// it, and only to know when waiting further is pointless: a fixture that beat
+// fewer times than this would still be caught by the assertions above.
+constexpr int kThreadedFixtureBeats = 120;
+
+// The threaded fixture's heartbeat file is append-only, one line per beat, so a
+// line count IS a beat count — and a half-written final line cannot be counted
+// as a beat that happened.
+int beatsIn(const std::string& path)
+{
+    std::ifstream in(path);
+    int beats = 0;
+    for (std::string line; std::getline(in, line); )
+        if (!line.empty())
+            ++beats;
+    return beats;
+}
+
+// Ask the loader whether `path` is still in this process, WITHOUT mapping it if
+// it is not: that is exactly what RTLD_NOLOAD is for. The reference it hands
+// back has to be given up again, or the probe would pin the very thing it came
+// to measure.
+bool imageIsStillMapped(const std::string& path)
+{
+#if defined(_WIN32)
+    return true;
+#else
+    void* handle = ::dlopen(path.c_str(), RTLD_NOLOAD | RTLD_LAZY);
+    if (handle)
+        ::dlclose(handle);
+    return handle != nullptr;
+#endif
+}
+
+} // namespace
+
+TEST(BareImageRetentionTest, AnImageAModuleHasRunInStaysMappedAfterTheUnload)
+{
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    LogosCore::InProcContainer container;
+    LogosCore::LoadedModuleHandle handle;
+
+    ASSERT_TRUE(container.launch(bareDescriptor(), "", {}, nullptr, handle));
+    container.terminate("bare_fixture");
+
+    EXPECT_TRUE(imageIsStillMapped(bareModulePath()))
+        << "the unload gave the module's image back to the loader; anything the "
+           "module left running is now executing unmapped pages (#96)";
+    EXPECT_GE(LogosCore::retainedBareImageCount(), 1u)
+        << "the host is not counting what it is keeping mapped";
+}
+
+TEST(BareImageRetentionTest, AModuleWhoseOwnThreadOutlivesTheUnloadDoesNotKillTheHost)
+{
+    ASSERT_FALSE(threadedModulePath().empty()) << "TEST_BARE_MODULE_THREADED is not set";
+
+    const std::string heartbeat =
+        (std::filesystem::temp_directory_path() /
+         ("logos_bare_heartbeat_" +
+          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+          ".log")).string();
+    std::filesystem::remove(heartbeat);
+
+    LogosCore::InProcContainer container;
+    LogosCore::LoadedModuleHandle handle;
+    LogosCore::ModuleDescriptor desc = bareDescriptor("bare_threaded");
+    desc.path = threadedModulePath();
+    // The context is what starts the fixture's thread, and the path it names is
+    // where that thread reports from — the one channel a module's own thread
+    // has that outlives the module's memory.
+    desc.instancePersistencePath = heartbeat;
+
+    ASSERT_TRUE(container.launch(desc, "", {}, nullptr, handle));
+
+    // Beating BEFORE the unload, or this test would pass just as well against a
+    // fixture that never started a thread at all.
+    int before = 0;
+    for (int i = 0; i < 400 && before == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        before = beatsIn(heartbeat);
+    }
+    ASSERT_GT(before, 0) << "the fixture never started its thread";
+
+    container.terminate("bare_threaded");
+
+    // ...and beating AFTER it. On the old behaviour this line is not reached on
+    // any loader that honours dlclose: the detached thread's next call lands in
+    // an unmapped page and the whole process goes, which is what the Shell did
+    // on the phone.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const int after = beatsIn(heartbeat);
+    EXPECT_GT(after, before)
+        << "the module's thread stopped at the unload, so this run never "
+           "exercised a thread outliving its image";
+
+    EXPECT_TRUE(imageIsStillMapped(threadedModulePath()))
+        << "the image that thread is executing in was handed back to the loader";
+
+    // Let the detached thread run out before the file goes: it writes straight
+    // through, so removing the file under it only leaves a new one.
+    for (int i = 0; i < 200 && beatsIn(heartbeat) < kThreadedFixtureBeats; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::filesystem::remove(heartbeat);
 }

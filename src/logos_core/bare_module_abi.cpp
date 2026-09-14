@@ -4,6 +4,8 @@
 #include <logos_protocol.h>
 
 #include <filesystem>
+#include <mutex>
+#include <set>
 
 #if defined(_WIN32)
 #  include <windows.h>
@@ -92,6 +94,42 @@ void resolveOptional(void* handle, const char* name, Fn& slot)
     slot = reinterpret_cast<Fn>(imageSymbol(handle, name));
 }
 
+// THE IMAGES THIS PROCESS WILL NEVER GIVE BACK, and the bookkeeping that keeps
+// it to one reference each. See closeBareModule in the header for why an image
+// a module has run in is not unmapped.
+//
+// The FIRST release of an image keeps its reference — that one is what pins the
+// mapping. Every later release of the same image gives its reference back
+// normally, because the pin already holds the image down and letting the
+// refcount climb once per load/unload cycle would only make the loader's own
+// accounting a lie. A loader returns the same handle for the same image, which
+// is what makes the set the right shape.
+struct RetainedImages {
+    std::mutex mutex;
+    std::set<void*> handles;
+};
+
+RetainedImages& retainedImages()
+{
+    static RetainedImages retained;
+    return retained;
+}
+
+void retainImage(void* handle)
+{
+    auto& retained = retainedImages();
+    bool pinnedByThisRelease = false;
+    {
+        std::lock_guard<std::mutex> lock(retained.mutex);
+        pinnedByThisRelease = retained.handles.insert(handle).second;
+    }
+    if (!pinnedByThisRelease) {
+        // Already pinned: this reference is a spare and giving it back cannot
+        // unmap anything.
+        imageClose(handle);
+    }
+}
+
 } // namespace
 
 bool openBareModule(const std::string& path, BareModuleAbi& out, std::string* error)
@@ -145,8 +183,15 @@ bool openBareModule(const std::string& path, BareModuleAbi& out, std::string* er
 void closeBareModule(BareModuleAbi& abi)
 {
     if (abi.handle)
-        imageClose(abi.handle);
+        retainImage(abi.handle);
     abi = BareModuleAbi{};
+}
+
+std::size_t retainedBareImageCount()
+{
+    auto& retained = retainedImages();
+    std::lock_guard<std::mutex> lock(retained.mutex);
+    return retained.handles.size();
 }
 
 bool bareModuleProtocolCompatible(const std::string& moduleVersion, std::string* reason)

@@ -124,8 +124,10 @@ private:
 
     // Instances whose dispatch thread would not stop. Kept alive for the life of
     // the process on purpose: the thread is still executing code in the image
-    // and still holds a pointer to the glue, so destroying either is a
-    // use-after-free and dlclose is an unmap of running code. See terminate().
+    // and still holds a pointer to the glue, so destroying the glue is a
+    // use-after-free. The IMAGE is kept mapped on every unload, not just this
+    // one (closeBareModule, #96); what this list adds is the glue. See
+    // terminate().
     std::vector<std::unique_ptr<Instance>> m_abandoned;
 
     LogosAPI* m_hostApi = nullptr;

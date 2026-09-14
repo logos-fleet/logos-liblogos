@@ -8,6 +8,12 @@
 // references at all, which also makes it the only Bare module in the tree that
 // can be dlopen'd by a test binary with no host image behind it.
 //
+// ITS STATE IS PROCESS-LIFETIME. `g_total` is a module global, and a Bare
+// image is never unmapped once a module has run in it (closeBareModule, #96),
+// so an unload does not reset the counter and the next test in this binary
+// inherits it. Every assertion on it is therefore a DELTA; an absolute one
+// would also be asserting, silently, that no earlier test touched the fixture.
+//
 // It answers a contract with one of each return shape the glue must classify at
 // runtime (`uint`, `void`, `result` under both of its published spellings) plus
 // an event, because those are exactly the distinctions the GENERATED Qt glue is
