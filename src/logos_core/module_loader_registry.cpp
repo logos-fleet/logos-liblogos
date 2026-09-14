@@ -61,6 +61,18 @@ std::unordered_map<std::string, int64_t> ModuleLoaderRegistry::getAllPids() cons
     return result;
 }
 
+std::unordered_map<std::string, ModuleResourceUsage>
+ModuleLoaderRegistry::getAllResourceUsage() const
+{
+    std::lock_guard lock(m_mutex);
+    std::unordered_map<std::string, ModuleResourceUsage> result;
+    for (const auto& loader : m_loaders) {
+        auto usage = loader->getAllResourceUsage();
+        result.insert(usage.begin(), usage.end());
+    }
+    return result;
+}
+
 void ModuleLoaderRegistry::clearForTests()
 {
     std::lock_guard lock(m_mutex);

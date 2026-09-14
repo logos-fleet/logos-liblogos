@@ -212,6 +212,8 @@ set(LOGOS_CORE_SOURCES
     logos_core/bare_module_glue.h
     logos_core/bare_module_loader.cpp
     logos_core/bare_module_loader.h
+    logos_core/module_stats_json.cpp
+    logos_core/module_stats_json.h
     logos_core/inproc_container.cpp
     logos_core/inproc_container.h
     # The WEB CONTAINER, registered the same way and for the same reason. The

@@ -105,6 +105,10 @@ namespace ModuleManager {
     bool isModuleLoaded(const std::string& name);
     std::unordered_map<std::string, int64_t> getModuleProcessIds();
 
+    // What each module with NO process is costing. Only containers that run
+    // modules in the host's own image contribute; see ModuleResourceUsage.
+    std::unordered_map<std::string, LogosCore::ModuleResourceUsage> getModuleResourceUsage();
+
     // The dependency version-range gate exactly as loadModuleInternal applies
     // it to `name`. A pure read of the registry — no plugin is touched.
     LogosCore::DependencyGateResult dependencyGateFor(const std::string& name);

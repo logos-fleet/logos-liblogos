@@ -1,6 +1,7 @@
 #include "logos_core.h"
 #include "logging/logos_log.h"
 #include "module_manager.h"
+#include "module_stats_json.h"
 #include "module_supervisor.h"
 #include <logos_instance.h>
 #include <process_stats/process_stats.h>
@@ -8,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -159,45 +161,32 @@ char* logos_core_get_token(const char* key) {
 }
 
 char* logos_core_get_module_stats() {
+    // Two sources, neither of which can answer for the other's modules.
+    // process-stats reads a PROCESS by pid, so it skips every module the
+    // Native container runs (pid -1, the LoadedModuleHandle sentinel); the
+    // container measures those without a process at all. mergeModuleStats puts
+    // them together and is where the whole shape of the answer is decided —
+    // see module_stats_json.h and logos_core.h's contract above.
     const auto pids = ModuleManager::getModuleProcessIds();
 
-    // process-stats answers by READING A PROCESS, so it can only answer for
-    // modules that are one. Every module the Native container runs reports the
-    // documented in-process sentinel (-1) and is silently absent from its
-    // array, which would make a running module look like no module at all —
-    // "stats has an entry per running module" is the whole contract of this
-    // call, and the pid it reports is what tells them apart.
-    //
-    // So the in-process ones are appended here with cpu/memory NULL rather than
-    // 0. Null is the honest value: their CPU and memory are the HOST's, already
-    // counted once against the daemon's own pid, and reporting 0 would say
-    // "measured, idle" for something that was never measured. A consumer that
-    // wants the number for an in-process module looks at the host process.
     char* raw = ProcessStats::getModuleStats(pids);
-    nlohmann::json stats = raw
+    const nlohmann::json processStats = raw
         ? nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false)
         : nlohmann::json(nullptr);
     delete[] raw;
-    if (!stats.is_array())
-        stats = nlohmann::json::array();
 
-    std::unordered_set<std::string> reported;
-    for (const auto& entry : stats) {
-        if (entry.is_object() && entry.contains("name") && entry["name"].is_string())
-            reported.insert(entry["name"].get<std::string>());
-    }
+    // ONE history for the life of the process, because a percentage is a
+    // difference between two samples and there is nowhere else to keep it: the
+    // caller is a C entry point with no handle to hang state off.
+    static LogosCore::InProcessCpuHistory cpuHistory;
+    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count();
 
-    for (const auto& [name, pid] : pids) {
-        if (pid >= 0 || reported.count(name))
-            continue;
-        stats.push_back({
-            {"name", name},
-            {"pid", pid},
-            {"cpu_percent", nullptr},
-            {"cpu_time_seconds", nullptr},
-            {"memory_mb", nullptr},
+    const nlohmann::json stats = LogosCore::mergeModuleStats(
+        pids, processStats, ModuleManager::getModuleResourceUsage(),
+        [nowMs](const std::string& name, double cpuTimeSeconds) {
+            return cpuHistory.percentFor(name, cpuTimeSeconds, nowMs);
         });
-    }
 
     const std::string dumped = stats.dump();
     char* result = new char[dumped.size() + 1];

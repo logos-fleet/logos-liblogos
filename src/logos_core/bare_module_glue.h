@@ -5,6 +5,8 @@
 
 #include <logos_provider_object.h>
 
+#include <process_stats/process_stats.h>
+
 #include <QJsonArray>
 #include <QSet>
 #include <QString>
@@ -12,7 +14,9 @@
 #include <QVariantList>
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -147,6 +151,21 @@ public:
     // happens when it does not take it.
     bool stopDispatch(int graceMs);
 
+    // THE CPU THIS MODULE HAS COST, and the reason the worker thread is worth
+    // having twice over.
+    //
+    // Every handler this module runs runs on that one thread and nothing else
+    // does, so the thread's CPU time IS the module's — which is the only
+    // per-module CPU figure obtainable in a process where every module shares
+    // the address space (#86). A module that starts threads of its own is not
+    // counted in it; this is a floor, and a floor is a measurement where the
+    // pid-based answer was a zero that meant "never looked".
+    //
+    // nullopt before enableDeferredDispatch (there is no thread yet) and after
+    // stopDispatch (there is no longer one, and a dead thread's handle can be
+    // recycled onto somebody else's work).
+    std::optional<double> dispatchCpuSeconds() const;
+
     // Ask the module to quiesce. Returns once it is done or `graceMs` elapsed —
     // logos_module_impl.h is explicit that returning 1 buys a grace period, not
     // a veto.
@@ -228,6 +247,17 @@ private:
     Dispatch m_dispatch = Dispatch::Inline;
     QThread* m_workerThread = nullptr;
     QObject* m_workerContext = nullptr;
+    // Captured ON the worker thread as it starts and invalidated before it is
+    // asked to stop: the clock is only obtainable from inside the thread it
+    // measures and only valid while that thread is alive.
+    //
+    // Its own lock, NOT m_dispatchMutex: the capture runs on the worker while
+    // enableDeferredDispatch is still holding that one, and the read happens on
+    // whichever thread is collecting stats, which must not queue behind a
+    // dispatch.
+    mutable std::mutex m_cpuMutex;
+    std::condition_variable m_cpuCaptured;
+    ProcessStats::ThreadCpuClock m_workerCpu;
     // Every deferred call posted and not yet claimed — one entry per call in
     // flight, so a linear scan is the right shape for it.
     std::vector<QueuedCall> m_queued;

@@ -22,6 +22,9 @@
 #include "bare_module_loader.h"
 #include "composite_module_loader.h"
 #include "module_registry.h"
+#include "module_resource_usage.h"
+
+#include <process_stats/process_stats.h>
 
 #include <logos_async_dispatch.h>
 #include <logos_protocol.h>
@@ -905,4 +908,143 @@ TEST(BareModuleGlueUnloadRaceTest, ACallThatArrivesAfterTheStopIsRefusedNotDispa
         << "the refused bump reached the module image anyway";
 
     LogosCore::closeBareModule(abi);
+}
+
+// ── what an in-process module COSTS ─────────────────────────────────────────
+//
+// process-stats measures a module by its pid, and this container's pid is the
+// -1 sentinel, so it can say nothing at all about one — and its zeroes read on
+// screen as "loaded and idle" rather than "never measured" (#86). The container
+// is the one place that knows what the module actually is in this process: one
+// image and one worker thread. These are the tests for measuring those.
+
+namespace {
+
+// An address certainly inside the TEST BINARY's image, for telling the host's
+// image apart from a module's.
+void anAddressInTheHostImage() {}
+
+} // namespace
+
+TEST(InProcModuleUsageTest, MeasuresALoadedModuleThatHasNoPid)
+{
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    LogosCore::InProcContainer container;
+    LogosCore::LoadedModuleHandle handle;
+
+    EXPECT_TRUE(container.getAllResourceUsage().empty())
+        << "nothing is loaded, so there is nothing to measure";
+
+    ASSERT_TRUE(container.launch(bareDescriptor(), "", {}, nullptr, handle));
+
+    const auto usage = container.getAllResourceUsage();
+    ASSERT_EQ(usage.size(), 1u);
+    ASSERT_EQ(usage.count("bare_fixture"), 1u);
+    const LogosCore::ModuleResourceUsage& measured = usage.at("bare_fixture");
+
+    // The figure that #86 is about. A module that is loaded has an image, and
+    // an image has a size: zero here is the answer that started this.
+    EXPECT_GT(measured.memoryBytes, 0u);
+    EXPECT_GE(measured.cpuTimeSeconds, 0.0);
+
+    container.terminate("bare_fixture");
+    EXPECT_TRUE(container.getAllResourceUsage().empty())
+        << "a terminated module must stop being measured, not keep its last reading";
+}
+
+TEST(InProcModuleUsageTest, TheMemoryItReportsIsTheMODULESImage)
+{
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+    LogosCore::InProcContainer container;
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(bareDescriptor(), "", {}, nullptr, handle));
+
+    // dlopen is reference-counted, so opening the fixture a second time is the
+    // SAME mapping the container is holding rather than a second copy of it —
+    // which is what makes this an independent reading of the same image.
+    LogosCore::BareModuleAbi probe;
+    std::string error;
+    ASSERT_TRUE(LogosCore::openBareModule(bareModulePath(), probe, &error)) << error;
+    const ProcessStats::ImageStatsData moduleImage =
+        ProcessStats::getImageStats(reinterpret_cast<const void*>(probe.dispatch));
+    LogosCore::closeBareModule(probe);
+
+    const ProcessStats::ImageStatsData hostImage =
+        ProcessStats::getImageStats(reinterpret_cast<const void*>(&anAddressInTheHostImage));
+
+    ASSERT_TRUE(moduleImage.resolved);
+    ASSERT_TRUE(hostImage.resolved);
+    ASSERT_NE(moduleImage.mappedBytes, hostImage.mappedBytes)
+        << "the two images are the same size, so this test cannot tell them apart";
+
+    const LogosCore::ModuleResourceUsage measured =
+        container.getAllResourceUsage().at("bare_fixture");
+
+    // Reporting the HOST's footprint for every in-process module would be the
+    // easy wrong answer: it is a real number, it moves, and every module would
+    // show the same one.
+    EXPECT_LE(measured.memoryBytes, moduleImage.mappedBytes);
+    EXPECT_NE(measured.memoryBytes, hostImage.mappedBytes);
+
+    container.terminateAll();
+}
+
+TEST_F(BareModuleGlueTest, ChargesItsWorkerThreadsCpuToTheModule)
+{
+    // A dispatch runs on the glue's OWN thread (see the threading note in
+    // bare_module_glue.h), which is what makes per-module CPU measurable in a
+    // process shared by every module: the thread is the module's.
+    EXPECT_FALSE(m_glue->dispatchCpuSeconds().has_value())
+        << "there is no worker thread yet, so there is nothing to charge";
+
+    CompletionCollector completions;
+    m_glue->setEventListener(completions.listener());
+    ensureQtApp();
+    m_glue->enableDeferredDispatch();
+
+    const std::optional<double> idle = m_glue->dispatchCpuSeconds();
+    ASSERT_TRUE(idle.has_value()) << "a started worker thread must be measurable";
+
+    // burn() WORKS, where stall() sleeps: a sleeping dispatch costs no CPU and
+    // could not tell a working thread from an idle one. Its argument is a count
+    // of iterations rather than a duration, so the CPU it costs does not depend
+    // on what share of a core this machine is giving the test -- see the note
+    // in the fixture.
+    QString callId;
+    ASSERT_TRUE(logos::isPendingCallSentinel(
+        m_glue->callMethod(QStringLiteral("burn"), QVariantList{100}), &callId));
+    ASSERT_TRUE(completions.waitFor(1)) << "the burn never completed";
+
+    const std::optional<double> charged = m_glue->dispatchCpuSeconds();
+    ASSERT_TRUE(charged.has_value());
+    // A hundred million volatile additions. The floor is a small fraction of
+    // what that actually costs: the claim under test is that the work landed on
+    // THIS thread's account, not that the machine is a particular speed.
+    EXPECT_GE(*charged - *idle, 0.02)
+        << "the work done inside the module was not charged to its thread";
+
+    ASSERT_TRUE(m_glue->stopDispatch(2000));
+    EXPECT_FALSE(m_glue->dispatchCpuSeconds().has_value())
+        << "the thread is gone; its handle must not be read again";
+}
+
+TEST(InProcModuleUsageTest, ACompositeLoaderPassesTheMeasurementThrough)
+{
+    // ModuleManager reaches every container through ModuleLoader, so a
+    // measurement a container can make is worth nothing until that interface
+    // carries it.
+    ASSERT_FALSE(bareModulePath().empty()) << "TEST_BARE_MODULE is not set";
+
+    auto container = std::make_shared<LogosCore::InProcContainer>();
+    LogosCore::CompositeModuleLoader loader(container,
+                                            std::make_shared<LogosCore::BareModuleFormatLoader>());
+
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(loader.load(bareDescriptor(), nullptr, handle));
+
+    const auto usage = loader.getAllResourceUsage();
+    ASSERT_EQ(usage.count("bare_fixture"), 1u);
+    EXPECT_GT(usage.at("bare_fixture").memoryBytes, 0u);
+
+    loader.terminateAll();
 }

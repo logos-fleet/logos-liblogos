@@ -66,4 +66,17 @@ std::unordered_map<std::string, int64_t> CompositeModuleLoader::getAllPids() con
     return container_->getAllPids();
 }
 
+std::unordered_map<std::string, ModuleResourceUsage>
+CompositeModuleLoader::getAllResourceUsage() const
+{
+    // Asked for, not required. ModuleContainer is the logos-container contract
+    // package's interface and is implemented outside this repo too; measuring a
+    // module without a pid is something only a container that runs modules
+    // in-process can do at all. One that cannot answers nothing, which leaves
+    // its modules to process-stats exactly as before.
+    if (const auto* measurable = dynamic_cast<const ResourceMeasurable*>(container_.get()))
+        return measurable->getAllResourceUsage();
+    return {};
+}
+
 } // namespace LogosCore

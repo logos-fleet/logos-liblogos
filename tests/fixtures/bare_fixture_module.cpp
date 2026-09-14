@@ -98,6 +98,8 @@ BARE_FIXTURE_EXPORT char* logos_module_get_methods(void)
       {"name":"inboundCaller","signature":"inboundCaller()","returnType":"tstr","isInvokable":true},
       {"name":"stall","signature":"stall(uint)","returnType":"uint","isInvokable":true,
        "parameters":[{"type":"uint","name":"ms"}]},
+      {"name":"burn","signature":"burn(uint)","returnType":"uint","isInvokable":true,
+       "parameters":[{"type":"uint","name":"millionIterations"}]},
       {"name":"tick","signature":"tick(uint)","returnType":"void","isInvokable":true},
       {"type":"event","name":"ticked","signature":"ticked(uint)",
        "parameters":[{"type":"uint","name":"value"}]}
@@ -142,6 +144,25 @@ BARE_FIXTURE_EXPORT char* logos_module_dispatch(const char* method, const char* 
         const long long ms = firstInt(argsJson, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         return dup(std::to_string(ms));
+    }
+    if (m == "burn") {
+        // stall()'s opposite: WORK rather than sleep. A sleeping dispatch costs
+        // the module no CPU at all, so it cannot show that the container
+        // charged anything to the right thread; this one can.
+        //
+        // COUNTED IN ITERATIONS, NOT MILLISECONDS, and that is the whole point.
+        // A loop bounded by the wall clock burns whatever share of a core the
+        // scheduler happens to give it -- measured at 22% on a machine that was
+        // also building an app, which is a quarter of the CPU a test would be
+        // expecting from "300ms of spinning". A fixed amount of work costs the
+        // same CPU however contended the machine is; only the wall clock moves.
+        //
+        // `sink` is volatile so no optimiser can delete the loop.
+        const long long millions = firstInt(argsJson, 0);
+        volatile double sink = 0.0;
+        for (long long i = 0; i < millions * 1000000; ++i)
+            sink += 0.5;
+        return dup(std::to_string(millions));
     }
     if (m == "tick") {
         const long long value = firstInt(argsJson, 0);

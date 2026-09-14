@@ -31,6 +31,7 @@ public:
     bool hasModule(const std::string& name) const override;
     std::optional<int64_t> pid(const std::string& name) const override;
     std::unordered_map<std::string, int64_t> getAllPids() const override;
+    std::unordered_map<std::string, ModuleResourceUsage> getAllResourceUsage() const override;
 
     ModuleContainer& container() { return *container_; }
     const ModuleContainer& container() const { return *container_; }

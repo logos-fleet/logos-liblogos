@@ -38,6 +38,10 @@ public:
     // name collision (should not happen in practice).
     std::unordered_map<std::string, int64_t> getAllPids() const;
 
+    // Aggregate getAllResourceUsage() the same way. Only loaders whose modules
+    // have no pid contribute anything.
+    std::unordered_map<std::string, ModuleResourceUsage> getAllResourceUsage() const;
+
     // Testing hook: remove all loaders so a test can install a FakeModuleLoader
     // without triggering any real Qt subprocess side effects.
     void clearForTests();
