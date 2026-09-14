@@ -25,6 +25,53 @@ using logos::plain::UnsubscribeMessage;
 
 // ── the routes ──────────────────────────────────────────────────────────────
 
+namespace {
+
+// The broker, by the one name every core registers it under.
+const char* const kCapabilityModule = "capability_module";
+
+// The protocol's word for "the target would not take our token". It is what a
+// consent refusal looks like from the outside, because an undecided or denied
+// pair is minted NO token at all.
+const char* const kUnauthorized = "unauthorized";
+
+} // namespace
+
+WebHostRoutes::CallOutcome refusedCallOutcome(const std::string& target,
+                                              const std::string& method,
+                                              const std::string& errorCode,
+                                              const std::string& errorMessage,
+                                              const QVariantMap& consentStatus)
+{
+    WebHostRoutes::CallOutcome outcome;
+    outcome.error = errorMessage.empty()
+        ? ("call to " + target + "." + method + " failed: " + errorCode)
+        : errorMessage;
+    outcome.errorCode = errorCode == "object_unavailable" ? "MODULE_NOT_LOADED"
+                                                          : "METHOD_FAILED";
+
+    if (errorCode != kUnauthorized)
+        return outcome;
+
+    // THE BROKER'S OWN WORDS, AND ONLY ITS OWN. An empty map is a question that
+    // was not asked or not answered, and a `granted` / `not-required` pair that
+    // still came back unauthorized is a token fault wearing a consent refusal's
+    // clothes -- relabelling either would send a developer to a dialog that is
+    // not the problem.
+    const QString state = consentStatus.value(QStringLiteral("state")).toString();
+    if (state == QLatin1String("denied"))
+        outcome.errorCode = "CONSENT_DENIED";
+    else if (state == QLatin1String("pending") || state == QLatin1String("unknown"))
+        outcome.errorCode = "CONSENT_REQUIRED";
+    else
+        return outcome;   // granted, not-required, or nothing was asked
+
+    const QString reason = consentStatus.value(QStringLiteral("reason")).toString();
+    if (!reason.isEmpty())
+        outcome.error = reason.toStdString();
+    return outcome;
+}
+
 LogosApiRoutes::LogosApiRoutes(LogosAPI* api, std::string moduleName)
     : m_api(api)
     , m_moduleName(std::move(moduleName))
@@ -76,17 +123,48 @@ WebHostRoutes::CallOutcome LogosApiRoutes::call(const std::string& target,
         Timeout(), &err);
 
     if (!err.code.empty()) {
-        outcome.error = err.message.empty()
-            ? ("call to " + target + "." + method + " failed: " + err.code)
-            : err.message;
-        outcome.errorCode = err.code == "object_unavailable" ? "MODULE_NOT_LOADED"
-                                                             : "METHOD_FAILED";
-        return outcome;
+        // A SECOND QUESTION, ONLY ON A REFUSAL THE GATE COULD HAVE CAUSED. The
+        // consent verdict costs a round trip, so it is bought exactly when the
+        // answer could change the sentence the page reads.
+        return refusedCallOutcome(target, method, err.code, err.message,
+                                  err.code == kUnauthorized ? consentStatusFor(target)
+                                                            : QVariantMap{});
     }
 
     outcome.ok = true;
     outcome.value = value;
     return outcome;
+}
+
+QVariantMap LogosApiRoutes::consentStatusFor(const std::string& target)
+{
+    // Never through the door that was just shut: a refusal by capability_module
+    // ITSELF cannot be explained by asking capability_module.
+    if (!m_api || target == kCapabilityModule)
+        return {};
+    const QString brokerName = QString::fromLatin1(kCapabilityModule);
+    LogosAPIClient* broker = m_api->getClient(brokerName);
+    if (!broker)
+        return {};
+
+    // The module's own credential for the broker is seeded at load, so this is
+    // an ordinary call and not a second handshake. `consentStatus` is a plain
+    // query -- it decides nothing and records nothing -- so a module asking
+    // about its own pair grants it nothing it did not already have.
+    logos::CallError err;
+    const QVariant answer = broker->invokeRemoteMethod(
+        brokerName, QStringLiteral("consentStatus"),
+        QVariantList{ QString::fromStdString(m_moduleName),
+                      QString::fromStdString(target) },
+        Timeout(), &err);
+    if (!err.code.empty()) {
+        // A broker that will not answer is not a reason to invent a verdict:
+        // the caller keeps the protocol's own refusal.
+        spdlog::debug("consentStatus for {} -> {} was refused: {}", m_moduleName, target,
+                      err.code);
+        return {};
+    }
+    return answer.toMap();
 }
 
 QJsonArray LogosApiRoutes::methods(const std::string& target)

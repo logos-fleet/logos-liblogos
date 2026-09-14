@@ -1456,3 +1456,105 @@ TEST(WebContainerTest, ASecondCallArrivingInsideTheFirstIsAnswered)
 
     container.terminateAll();
 }
+
+// ── what a page is told when the 4.7.3 consent gate stopped its call ───────
+//
+// The refusal itself is the protocol's: capability_module mints no token for an
+// undecided or a denied pair, the target rejects the tokenless call, and the
+// client gives up with `unauthorized`. What these cover is the SENTENCE the page
+// then reads, because "token not recognized (re-exchange failed)" is the one
+// description of a consent refusal that sounds like a bug in the token
+// machinery. See refusedCallOutcome's declaration.
+
+namespace {
+
+QVariantMap consentState(const char* state, const char* reason)
+{
+    return QVariantMap{{QStringLiteral("state"), QString::fromUtf8(state)},
+                       {QStringLiteral("reason"), QString::fromUtf8(reason)}};
+}
+
+} // namespace
+
+TEST(WebCallRefusalTest, AnUndecidedPairIsReportedAsConsentRequired)
+{
+    const auto out = LogosCore::refusedCallOutcome(
+        "package_manager", "getInstalledPackages", "unauthorized",
+        "call to 'package_manager' rejected: token not recognized (re-exchange failed)",
+        consentState("pending", "'web_counter_b' wants to use 'package_manager' "
+                                "and you have not decided yet"));
+
+    EXPECT_FALSE(out.ok);
+    EXPECT_EQ(out.errorCode, "CONSENT_REQUIRED");
+    EXPECT_EQ(out.error, "'web_counter_b' wants to use 'package_manager' "
+                         "and you have not decided yet");
+}
+
+TEST(WebCallRefusalTest, AnUnannouncedPairIsAlsoConsentRequired)
+{
+    // `unknown` is the same question one announcement earlier: capability_module
+    // says `pending` only once it has announced, and a page can be refused and
+    // ask before that announcement is recorded.
+    const auto out = LogosCore::refusedCallOutcome(
+        "package_manager", "getInstalledPackages", "unauthorized", "token not recognized",
+        consentState("unknown", "'a' wants to use 'b' and you have not decided yet"));
+
+    EXPECT_EQ(out.errorCode, "CONSENT_REQUIRED");
+}
+
+TEST(WebCallRefusalTest, ADeniedPairIsReportedAsConsentDenied)
+{
+    const auto out = LogosCore::refusedCallOutcome(
+        "package_manager", "getInstalledPackages", "unauthorized", "token not recognized",
+        consentState("denied", "you did not allow 'web_counter_b' to use "
+                               "'package_manager', so its calls to it fail"));
+
+    EXPECT_EQ(out.errorCode, "CONSENT_DENIED");
+    EXPECT_EQ(out.error, "you did not allow 'web_counter_b' to use 'package_manager', "
+                         "so its calls to it fail");
+}
+
+TEST(WebCallRefusalTest, AnUnauthorizedCallTheGateAllowsKeepsItsOwnError)
+{
+    // A granted pair that STILL comes back unauthorized is a token fault and
+    // must keep saying so: relabelling it as a consent problem would send a
+    // developer to a dialog that has already been answered.
+    for (const char* state : {"granted", "not-required"}) {
+        const auto out = LogosCore::refusedCallOutcome(
+            "package_manager", "getInstalledPackages", "unauthorized",
+            "token not recognized (re-exchange failed)",
+            consentState(state, "you allowed it"));
+        EXPECT_EQ(out.errorCode, "METHOD_FAILED") << state;
+        EXPECT_EQ(out.error, "token not recognized (re-exchange failed)") << state;
+    }
+}
+
+TEST(WebCallRefusalTest, WithNoAnswerFromTheBrokerNothingIsInvented)
+{
+    const auto out = LogosCore::refusedCallOutcome(
+        "package_manager", "getInstalledPackages", "unauthorized",
+        "token not recognized (re-exchange failed)", QVariantMap{});
+
+    EXPECT_EQ(out.errorCode, "METHOD_FAILED");
+    EXPECT_EQ(out.error, "token not recognized (re-exchange failed)");
+}
+
+TEST(WebCallRefusalTest, AnUnreachableTargetIsStillAMissingModule)
+{
+    const auto out = LogosCore::refusedCallOutcome(
+        "greeter", "greet", "object_unavailable", "greeter is not loaded", QVariantMap{});
+
+    EXPECT_EQ(out.errorCode, "MODULE_NOT_LOADED");
+    EXPECT_EQ(out.error, "greeter is not loaded");
+}
+
+TEST(WebCallRefusalTest, ARefusalWithNoMessageStillNamesTheCall)
+{
+    // The protocol may refuse with a code and nothing else; a page shown an
+    // empty string learns less than one shown the call that failed.
+    const auto out = LogosCore::refusedCallOutcome(
+        "package_manager", "getInstalledPackages", "timeout", "", QVariantMap{});
+
+    EXPECT_EQ(out.errorCode, "METHOD_FAILED");
+    EXPECT_EQ(out.error, "call to package_manager.getInstalledPackages failed: timeout");
+}
