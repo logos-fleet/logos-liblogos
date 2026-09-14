@@ -27,6 +27,9 @@
 
 #include "module_registry.h"
 
+#include <logos_caller_scope.h>
+#include <module_proxy.h>
+
 #include <in_memory_channel.h>
 #include <message_channel.h>
 #include <web_message_codec.h>
@@ -234,6 +237,14 @@ public:
         std::lock_guard<std::mutex> g(m_mu);
         return m_lastCallAuthToken;
     }
+    // WHO THE CONTAINER SAID WAS CALLING. A real page reads this instead of
+    // deriving an identity from the token it was handed — which is the module's
+    // own root credential and therefore names the page itself.
+    std::string lastCallCaller() const
+    {
+        std::lock_guard<std::mutex> g(m_mu);
+        return m_lastCallCaller;
+    }
 
 private:
     void onMessage(const std::string& text)
@@ -251,6 +262,7 @@ private:
             {
                 std::lock_guard<std::mutex> g(m_mu);
                 m_lastCallAuthToken = call->authToken;
+                m_lastCallCaller = call->caller;
                 die.swap(m_dieOnCall);
             }
             if (die) { die(); return; }
@@ -329,6 +341,7 @@ private:
     std::string m_lastTokenModule;
     std::string m_lastToken;
     std::string m_lastCallAuthToken;
+    std::string m_lastCallCaller;
     std::string m_credential;
     std::function<void()> m_dieOnCall;
     std::atomic<uint64_t> m_nextId{1};
@@ -724,6 +737,155 @@ TEST(WebContainerTest, ATokenPushIsRelayedToThePage)
     // own ModuleProxy can validate an inbound call with transport tag "web".
     container.glueFor("js_counter")->callMethod(QStringLiteral("add"), { 1, 1 });
     EXPECT_EQ(backend.page().lastCallAuthToken(), "root-credential");
+
+    container.terminateAll();
+}
+
+// ── who is calling, across the relay ────────────────────────────────────────
+//
+// A RELAY CANNOT BE IDENTIFIED BY ITS TOKEN. The container presents the relayed
+// module's OWN root credential on every call it forwards — it holds no other —
+// so a page deriving "who is calling me" from that token names ITSELF for every
+// caller in the fleet. Measured on a device: keystore_module.caller_identity(),
+// asked by wallet_ui, answered `module "keystore_module"`, and every name-gated
+// method on that module then refused everybody (logos-workspace#129).
+//
+// So the identity travels beside the token, as CallMessage::caller. The three
+// cases below are the whole contract: a dispatch names its caller, no dispatch
+// names nobody, and a second web module calling the first is the shape the
+// device run failed at.
+
+TEST(WebContainerTest, ARelayedCallTellsThePageWhichModuleIsCalling)
+{
+    ViewBackend backend;
+    LogosCore::WebContainer container;
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    auto* glue = container.glueFor("js_counter");
+    ASSERT_NE(glue, nullptr);
+
+    {
+        // Exactly what ModuleProxy::callRemoteMethod does the instant it has
+        // authorized an inbound call, on the thread it will dispatch on.
+        logos::CallerScope scope(logos::callerModuleJson("wallet_ui"));
+        EXPECT_EQ(glue->callMethod(QStringLiteral("add"), { 1, 2 }).toInt(), 3);
+    }
+
+    // The document, not a name: the page parses it with the same reader every
+    // other backend uses, so what has to arrive is the whole arm.
+    EXPECT_EQ(backend.page().lastCallCaller(),
+              R"({"kind":"module","name":"wallet_ui"})");
+
+    container.terminateAll();
+}
+
+TEST(WebContainerTest, ACallWithNoDispatchBehindItNamesNobodyRatherThanUnknown)
+{
+    ViewBackend backend;
+    LogosCore::WebContainer container;
+    LogosCore::LoadedModuleHandle handle;
+    ASSERT_TRUE(container.launch(webDescriptor(), "", {}, {}, handle));
+
+    // No CallerScope: the container calling its own module, a host with no
+    // dispatch behind it. EMPTY rather than {"kind":"unknown"} — the field is
+    // omitted from the wire entirely, which is what leaves a page's existing
+    // fallback (and a peer that predates the field) exactly as it was.
+    container.glueFor("js_counter")->callMethod(QStringLiteral("add"), { 1, 2 });
+    EXPECT_EQ(backend.page().lastCallCaller(), "");
+
+    container.terminateAll();
+}
+
+namespace {
+
+// The host, as a page reaches it, pointed at ONE published module — which is
+// what makes the next case two web modules rather than one and a stand-in. The
+// token is the grant capability_module mints for the pair; the routes present
+// it exactly as LogosApiRoutes presents the one its LogosAPIClient cached.
+class ProxyRoutes : public LogosCore::WebHostRoutes {
+public:
+    ProxyRoutes(std::string name, QString grant)
+        : m_name(std::move(name)), m_grant(std::move(grant)) {}
+
+    // Set after the module is launched, because the proxy needs the glue the
+    // launch creates while the ROUTES have to exist before it (the container
+    // captures them per launch).
+    void setTarget(ModuleProxy* target) { m_target = target; }
+
+    CallOutcome call(const std::string& target, const std::string& method,
+                     const QVariantList& args) override
+    {
+        CallOutcome outcome;
+        if (!m_target || target != m_name) {
+            outcome.error = "no such module: " + target;
+            outcome.errorCode = "MODULE_NOT_LOADED";
+            return outcome;
+        }
+        // "web" because that is the wire the page is on, and it is what makes
+        // the proxy treat this as a remote call rather than a local one.
+        outcome.value = m_target->callRemoteMethod(
+            m_grant, QString::fromStdString(method), args, QStringLiteral("web"));
+        outcome.ok = outcome.value.isValid();
+        return outcome;
+    }
+
+    QJsonArray methods(const std::string&) override { return {}; }
+    bool subscribe(const std::string&, const std::string&, EventSink) override { return false; }
+    void unsubscribe(const std::string&, const std::string&) override {}
+
+private:
+    ModuleProxy* m_target = nullptr;
+    std::string m_name;
+    QString m_grant;
+};
+
+} // namespace
+
+// THE SHAPE THE DEVICE RUN FAILED AT, with no device in it: two `web` modules
+// in one process, one calling the other, and the callee asked who called.
+//
+// Every hop is the production one — the caller's page puts a Call on its own
+// channel, the container's router takes it to the callee's ModuleProxy, the
+// proxy authorizes the grant and names the caller, and the relay carries that
+// name to the callee's page. The only thing standing in for the core is which
+// module the routes point at.
+TEST(WebContainerTest, AWebModuleCallingAnotherWebModuleIsNamedToTheCallee)
+{
+    ensureApp();
+    ViewBackend backend;
+    // Before the launches: the container captures the routes per launch.
+    ProxyRoutes routes("keystore_module", QStringLiteral("grant-129-wallet-to-keystore"));
+    LogosCore::WebContainer container;
+    container.setHostRoutes(&routes);
+
+    LogosCore::LoadedModuleHandle callerHandle;
+    ASSERT_TRUE(container.launch(webDescriptor("wallet_ui"), "", {}, {}, callerHandle));
+    LogosCore::LoadedModuleHandle calleeHandle;
+    ASSERT_TRUE(container.launch(webDescriptor("keystore_module"), "", {}, {}, calleeHandle));
+
+    auto* callee = container.glueFor("keystore_module");
+    ASSERT_NE(callee, nullptr);
+
+    // The callee, published as the core publishes it, holding one grant of the
+    // shape capability_module mints for <wallet_ui -> keystore_module>.
+    ModuleProxy calleeProxy(callee);
+    ASSERT_TRUE(calleeProxy.saveToken(QStringLiteral("wallet_ui"),
+                                      QStringLiteral("grant-129-wallet-to-keystore")));
+    routes.setTarget(&calleeProxy);
+
+    // page(0) is wallet_ui's, page(1) is keystore_module's — in launch order.
+    const uint64_t id = backend.page(0).callHost(
+        "keystore_module", "add", { RpcValue(int64_t{2}), RpcValue(int64_t{3}) });
+    ResultMessage res;
+    ASSERT_TRUE(waitFor([&] { return backend.page(0).resultFor(id, res); }, 10000))
+        << "wallet_ui's call never came back";
+    ASSERT_TRUE(res.ok) << res.err;
+    EXPECT_EQ(asInteger(res.value), 5);
+
+    // THE CRITERION: the callee was told wallet_ui, not its own name.
+    EXPECT_EQ(backend.page(1).lastCallCaller(),
+              R"({"kind":"module","name":"wallet_ui"})");
 
     container.terminateAll();
 }

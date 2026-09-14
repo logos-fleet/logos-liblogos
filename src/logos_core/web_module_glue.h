@@ -41,13 +41,22 @@ namespace LogosCore {
 // at load and delivered with sendToken — so the page's own ModuleProxy
 // validates with transport tag "web", exactly as a TCP module's does.
 //
-// THE LIMIT, stated rather than implied: the relay presents the module's
-// credential, not the ORIGINAL CALLER's. LogosProviderObject::callMethod is
-// handed a method and arguments and no caller, so there is nothing here to
-// forward; a page therefore cannot distinguish two native callers by token.
-// It is the same shape of gap InProcContainer records for a Bare module's
-// outbound half, and it closes the same way — when the caller document
-// (LogosAPI::currentCallerJson) is threaded through this seam.
+// IT PRESENTS THE MODULE'S CREDENTIAL AND NAMES THE CALLER SEPARATELY.
+//
+// The token on a relayed call is the module's OWN root credential, because that
+// is the only one the container holds — so a page has never been able to tell
+// two callers apart by token, and the derivation that looks right (the name the
+// token was filed under) answers the page ITSELF for every caller in the fleet.
+// Measured on a device: keystore_module.caller_identity(), asked by wallet_ui,
+// answered `module "keystore_module"`, and every name-gated method on that
+// module then refused everybody (logos-workspace#129).
+//
+// So the identity travels beside the token, as data: callMethod() pulls the
+// caller document of the dispatch it is inside out of the thread-local
+// ModuleProxy opened (logos::currentInboundCallerJson) and hands it to the page
+// through LogosObjectCallerChannel, which puts it in CallMessage::caller. The
+// token still authorizes; the document only names. This is what the InProcContainer
+// note calls "when the caller document is threaded through this seam", done.
 class WebModuleGlue : public LogosProviderBase {
 public:
     // `page` is the handle the container obtained from the web transport for
@@ -118,7 +127,13 @@ private:
     // Call the page and wait for its answer, pumping this thread's event loop
     // when it is the Qt main thread — see the definition, where the reason is a
     // deadlock rather than a preference.
-    QVariant awaitPage(const QString& methodName, const QVariantList& args);
+    //
+    // `callerJson` is the caller document to put on the call, or EMPTY for
+    // "nobody named one" — which is not the same as {"kind":"unknown"} and is
+    // omitted from the wire entirely, leaving the page's own fallback in place.
+    QVariant awaitPage(const std::string& callerJson,
+                       const QString& methodName,
+                       const QVariantList& args);
 
     std::atomic<int> m_awaiting{0};
 
