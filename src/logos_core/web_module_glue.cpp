@@ -1,5 +1,6 @@
 #include "web_module_glue.h"
 
+#include <logos_caller_scope.h>
 #include <logos_object.h>
 #include <token_manager.h>
 
@@ -70,11 +71,27 @@ QString WebModuleGlue::authToken() const
 // module, which is why a subprocess module has always been able to call back
 // while the core waits on it. Off the Qt main thread nothing is being starved
 // and the ordinary blocking call is used.
-QVariant WebModuleGlue::awaitPage(const QString& methodName, const QVariantList& args)
+QVariant WebModuleGlue::awaitPage(const std::string& callerJson,
+                                  const QString& methodName,
+                                  const QVariantList& args)
 {
+    // THE DOOR TO USE, decided once for both waits below: the caller-carrying
+    // one when there is a caller to carry and the handle has that door, and the
+    // plain one otherwise. Every handle the web transport returns is a
+    // PlainLogosObject and so implements the channel — the cast is the
+    // contract's own optionality (logos_object.h), not a doubt about this
+    // transport, and a handle that fails it keeps exactly today's behaviour
+    // rather than losing the call.
+    LogosObjectCallerChannel* named =
+        callerJson.empty() ? nullptr : dynamic_cast<LogosObjectCallerChannel*>(m_page);
+
     QCoreApplication* app = QCoreApplication::instance();
-    if (!app || QThread::currentThread() != app->thread())
+    if (!app || QThread::currentThread() != app->thread()) {
+        if (named)
+            return named->callMethodForCaller(callerJson, authToken(), methodName,
+                                              args, kCallTimeoutMs);
         return m_page->callMethod(authToken(), methodName, args, kCallTimeoutMs);
+    }
 
     // WHERE THE REPLY LANDS, AND WHY IT IS NOT THIS STACK FRAME.
     //
@@ -129,20 +146,29 @@ QVariant WebModuleGlue::awaitPage(const QString& methodName, const QVariantList&
         }
     } awaiting(*this, &loop);
 
-    m_page->callMethodAsync(authToken(), methodName, args, kCallTimeoutMs,
-        [waiter](QVariant value) {
-            std::lock_guard<std::mutex> lock(waiter->mu);
-            waiter->result = std::move(value);
-            waiter->done = true;
-            // Queued, because this lands on the transport's delivery thread.
-            // A quit posted before exec() begins is NOT lost: it is an event on
-            // that thread's queue and the loop below will process it.
-            if (waiter->loop) {
-                QEventLoop* waking = waiter->loop;
-                QMetaObject::invokeMethod(waking, [waking] { waking->quit(); },
-                                          Qt::QueuedConnection);
-            }
-        });
+    // Named rather than written inline, because the two doors below take the
+    // same handler and only differ in whether they carry the caller.
+    auto onAnswer = [waiter](QVariant value) {
+        std::lock_guard<std::mutex> lock(waiter->mu);
+        waiter->result = std::move(value);
+        waiter->done = true;
+        // Queued, because this lands on the transport's delivery thread.
+        // A quit posted before exec() begins is NOT lost: it is an event on
+        // that thread's queue and the loop below will process it.
+        if (waiter->loop) {
+            QEventLoop* waking = waiter->loop;
+            QMetaObject::invokeMethod(waking, [waking] { waking->quit(); },
+                                      Qt::QueuedConnection);
+        }
+    };
+
+    if (named) {
+        named->callMethodAsyncForCaller(callerJson, authToken(), methodName, args,
+                                        kCallTimeoutMs, std::move(onAnswer));
+    } else {
+        m_page->callMethodAsync(authToken(), methodName, args, kCallTimeoutMs,
+                                std::move(onAnswer));
+    }
 
     bool answered = false;
     {
@@ -182,7 +208,27 @@ void WebModuleGlue::abandonPendingCalls()
 QVariant WebModuleGlue::callMethod(const QString& methodName, const QVariantList& args)
 {
     if (!m_page) return QVariant();
-    return awaitPage(methodName, args);
+
+    // THE PULL, on the dispatching thread and before anything can hand this
+    // call to another one. ModuleProxy opened the scope on this thread right
+    // after it authorized the call, and this glue is compiled into the SAME
+    // image as ModuleProxy — so the thread-local read here is the one
+    // CallerScope wrote, with no cross-image hop to make. (That is the
+    // difference from a generated plugin glue, which reads its own image's
+    // empty copy and has to pull by name through LogosAPI instead. It is also
+    // why this does not go through LogosProviderBase::currentCallerJson(): the
+    // Web container hands its glue no LogosAPI, so that accessor would answer
+    // callerUnknownJson() for every caller in the fleet.)
+    //
+    // EMPTY STAYS EMPTY, and is not converted to {"kind":"unknown"} the way the
+    // module-impl C ABI's push requires. Empty here means "this call did not
+    // come through a dispatch at all" — the container calling its own module,
+    // a test driving the glue directly — and it is the one state in which the
+    // page should keep whatever fallback it had rather than be told that its
+    // caller could not be named. See CallMessage::caller in logos-protocol.
+    const std::string callerJson = logos::currentInboundCallerJson();
+
+    return awaitPage(callerJson, methodName, args);
 }
 
 QJsonArray WebModuleGlue::getMethods()
