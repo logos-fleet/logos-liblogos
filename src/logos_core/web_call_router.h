@@ -7,6 +7,7 @@
 #include <QString>
 #include <QVariant>
 #include <QVariantList>
+#include <QVariantMap>
 
 #include <atomic>
 #include <condition_variable>
@@ -61,6 +62,29 @@ public:
     virtual void unsubscribe(const std::string& target, const std::string& eventName) = 0;
 };
 
+// WHAT A REFUSED CALL TELLS THE PAGE, as a pure function of the refusal.
+//
+// A call the 4.7.3 consent gate stopped comes back from the protocol as
+// `unauthorized` -- capability_module mints NO token for an undecided or denied
+// pair, the target's ModuleProxy then rejects the tokenless call, and the client
+// re-exchanges once and gives up. That is the right refusal and a useless
+// sentence: "token not recognized (re-exchange failed)" reads like a bug in the
+// token machinery, which is the one thing it is not.
+//
+// So a page that was refused is told WHY by the module that decided it.
+// `consentStatus` is capability_module's own answer for the pair -- `state` plus
+// a `reason` written for a person -- or an empty map when it was not consulted
+// or did not answer, in which case nothing here invents one.
+//
+// Pure, and separate from the call, because the interesting cases are the
+// mappings and they are otherwise reachable only through a running core with a
+// real broker in it.
+WebHostRoutes::CallOutcome refusedCallOutcome(const std::string& target,
+                                              const std::string& method,
+                                              const std::string& errorCode,
+                                              const std::string& errorMessage,
+                                              const QVariantMap& consentStatus);
+
 // The routes a module's OWN LogosAPI opens: the same door a native module
 // calls other modules through, entered as this module.
 //
@@ -84,6 +108,12 @@ public:
     void unsubscribe(const std::string& target, const std::string& eventName) override;
 
 private:
+    // capability_module's own verdict on (this module -> `target`), or an empty
+    // map when there is nothing to ask or it did not answer. Only ever called
+    // on a refusal, and never for capability_module itself -- a question asked
+    // through the very door that was just shut would ask itself.
+    QVariantMap consentStatusFor(const std::string& target);
+
     LogosAPI* m_api = nullptr;
     std::string m_moduleName;
 
