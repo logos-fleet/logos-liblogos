@@ -54,33 +54,28 @@ nlohmann::json mergeModuleStats(
         if (pid >= 0 || reported.count(name))
             continue;
 
-        const auto measured = usage.find(name);
-        if (measured == usage.end()) {
-            // NULL, NOT 0. Those resources exist and are the host's; nobody
-            // measured this module's share of them, and zero is what a loaded,
-            // idle module reports.
-            merged.push_back({
-                {"name", name},
-                {"pid", pid},
-                {"cpu_percent", nullptr},
-                {"cpu_time_seconds", nullptr},
-                {"memory_mb", nullptr},
-                {"scope", "in_process"},
-                {"memory_kind", nullptr},
-            });
-            continue;
-        }
-
-        merged.push_back({
+        // NULL, NOT 0, is what an unmeasured module starts as. Those resources
+        // exist and are the host's; nobody measured this module's share of
+        // them, and zero is what a loaded, idle module reports.
+        nlohmann::json entry{
             {"name", name},
             {"pid", pid},
-            {"cpu_percent", inProcessCpuPercent(name, measured->second.cpuTimeSeconds)},
-            {"cpu_time_seconds", measured->second.cpuTimeSeconds},
-            {"memory_mb", measured->second.memoryBytes / (1024.0 * 1024.0)},
+            {"cpu_percent", nullptr},
+            {"cpu_time_seconds", nullptr},
+            {"memory_mb", nullptr},
             {"scope", "in_process"},
-            {"memory_kind",
-             measured->second.memoryIsResident ? "image_resident" : "image_mapped"},
-        });
+            {"memory_kind", nullptr},
+        };
+
+        const auto measured = usage.find(name);
+        if (measured != usage.end()) {
+            const ModuleResourceUsage& cost = measured->second;
+            entry["cpu_percent"] = inProcessCpuPercent(name, cost.cpuTimeSeconds);
+            entry["cpu_time_seconds"] = cost.cpuTimeSeconds;
+            entry["memory_mb"] = cost.memoryBytes / (1024.0 * 1024.0);
+            entry["memory_kind"] = cost.memoryIsResident ? "image_resident" : "image_mapped";
+        }
+        merged.push_back(std::move(entry));
     }
 
     return merged;
