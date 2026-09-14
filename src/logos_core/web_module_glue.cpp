@@ -75,16 +75,19 @@ QVariant WebModuleGlue::awaitPage(const std::string& callerJson,
                                   const QString& methodName,
                                   const QVariantList& args)
 {
-    // The door that carries the caller, when the handle has one. Every handle
-    // the web transport returns is a PlainLogosObject and therefore does — the
-    // cast is the contract's own optionality (logos_object.h), not a doubt
-    // about this transport, and a handle that fails it keeps exactly today's
-    // behaviour rather than losing the call.
-    auto* named = dynamic_cast<LogosObjectCallerChannel*>(m_page);
+    // THE DOOR TO USE, decided once for both waits below: the caller-carrying
+    // one when there is a caller to carry and the handle has that door, and the
+    // plain one otherwise. Every handle the web transport returns is a
+    // PlainLogosObject and so implements the channel — the cast is the
+    // contract's own optionality (logos_object.h), not a doubt about this
+    // transport, and a handle that fails it keeps exactly today's behaviour
+    // rather than losing the call.
+    LogosObjectCallerChannel* named =
+        callerJson.empty() ? nullptr : dynamic_cast<LogosObjectCallerChannel*>(m_page);
 
     QCoreApplication* app = QCoreApplication::instance();
     if (!app || QThread::currentThread() != app->thread()) {
-        if (named && !callerJson.empty())
+        if (named)
             return named->callMethodForCaller(callerJson, authToken(), methodName,
                                               args, kCallTimeoutMs);
         return m_page->callMethod(authToken(), methodName, args, kCallTimeoutMs);
@@ -143,22 +146,23 @@ QVariant WebModuleGlue::awaitPage(const std::string& callerJson,
         }
     } awaiting(*this, &loop);
 
-    auto onAnswer =
-        [waiter](QVariant value) {
-            std::lock_guard<std::mutex> lock(waiter->mu);
-            waiter->result = std::move(value);
-            waiter->done = true;
-            // Queued, because this lands on the transport's delivery thread.
-            // A quit posted before exec() begins is NOT lost: it is an event on
-            // that thread's queue and the loop below will process it.
-            if (waiter->loop) {
-                QEventLoop* waking = waiter->loop;
-                QMetaObject::invokeMethod(waking, [waking] { waking->quit(); },
-                                          Qt::QueuedConnection);
-            }
-        };
+    // Named rather than written inline, because the two doors below take the
+    // same handler and only differ in whether they carry the caller.
+    auto onAnswer = [waiter](QVariant value) {
+        std::lock_guard<std::mutex> lock(waiter->mu);
+        waiter->result = std::move(value);
+        waiter->done = true;
+        // Queued, because this lands on the transport's delivery thread.
+        // A quit posted before exec() begins is NOT lost: it is an event on
+        // that thread's queue and the loop below will process it.
+        if (waiter->loop) {
+            QEventLoop* waking = waiter->loop;
+            QMetaObject::invokeMethod(waking, [waking] { waking->quit(); },
+                                      Qt::QueuedConnection);
+        }
+    };
 
-    if (named && !callerJson.empty()) {
+    if (named) {
         named->callMethodAsyncForCaller(callerJson, authToken(), methodName, args,
                                         kCallTimeoutMs, std::move(onAnswer));
     } else {
