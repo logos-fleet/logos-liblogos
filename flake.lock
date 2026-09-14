@@ -13381,11 +13381,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1789041963,
-        "narHash": "sha256-KJGPeoy94AJIYPvNwKrknxWDQH81zg+AKSOVLJkM7a0=",
+        "lastModified": 1789359931,
+        "narHash": "sha256-kGgvxw4NAhbCia7hO47sgrIgIwXWpVX6gUBFnFvnLyQ=",
         "owner": "logos-fleet",
         "repo": "process-stats",
-        "rev": "28ae028320139beccb95340a8b4a341364d1601e",
+        "rev": "f711ef76ae129a1675213ee3f4e4255bfcf97094",
         "type": "github"
       },
       "original": {
